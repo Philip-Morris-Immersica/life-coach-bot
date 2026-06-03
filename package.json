@@ -7,6 +7,9 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
+    "web:dev": "next dev",
+    "web:build": "next build",
+    "web:start": "next start",
     "db:init": "tsx scripts/init-db.ts",
     "db:push": "drizzle-kit push",
     "db:generate": "drizzle-kit generate",
@@ -20,16 +23,28 @@
   "license": "ISC",
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
+    "bcryptjs": "^3.0.3",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
+    "jose": "^6.2.3",
+    "next": "^16.2.7",
     "node-cron": "^4.2.1",
     "openai": "^6.41.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
     "telegraf": "^4.16.3"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.0",
+    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^25.9.1",
     "@types/node-cron": "^3.0.11",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.5.0",
     "drizzle-kit": "^0.31.10",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^4.3.0",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }

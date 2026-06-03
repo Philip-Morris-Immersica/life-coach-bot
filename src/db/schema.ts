@@ -2,6 +2,7 @@ import {
   bigint,
   boolean,
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -9,10 +10,15 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 
-// Потребители (по един ред на Telegram акаунт)
+// Потребители — общи за Telegram и уеб сайта. telegram_id и email са nullable
+// поотделно, така че профил може да съществува само в Telegram, само в уеб,
+// или свързан и в двете (чрез /link код).
 export const usersTable = pgTable("lc_users", {
   id: integer().primaryKey().generatedAlwaysAsIdentity(),
-  telegramId: bigint("telegram_id", { mode: "number" }).notNull().unique(),
+  telegramId: bigint("telegram_id", { mode: "number" }).unique(),
+  email: varchar({ length: 255 }).unique(),
+  passwordHash: text("password_hash"),
+  isAdmin: boolean("is_admin").notNull().default(false),
   name: varchar({ length: 255 }),
   // 'new' (още нищо) | 'interview' (тече опознавателна сесия) | 'done'
   onboardingStage: varchar("onboarding_stage", { length: 20 })
@@ -95,6 +101,28 @@ export const insightsTable = pgTable("lc_insights", {
     .references(() => usersTable.id, { onDelete: "cascade" }),
   content: text().notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+// Кодове за свързване на Telegram акаунт с уеб профил (или за magic-link вход).
+// Кратък срок на валидност; еднократна употреба.
+export const linkCodesTable = pgTable("lc_link_codes", {
+  code: varchar({ length: 16 }).primaryKey(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => usersTable.id, { onDelete: "cascade" }),
+  // 'link' (за свързване с уеб профил) | 'login' (за magic-link вход)
+  purpose: varchar({ length: 20 }).notNull().default("link"),
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+// Глобални настройки на бота (промпти, модели, разписание). Един ред (key='main').
+// Стойностите се сливат с DEFAULT_SETTINGS в src/core/settings.ts при четене.
+export const settingsTable = pgTable("lc_settings", {
+  key: varchar({ length: 32 }).primaryKey(),
+  data: jsonb().notNull(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
 export type User = typeof usersTable.$inferSelect;

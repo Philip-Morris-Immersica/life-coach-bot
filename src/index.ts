@@ -1,12 +1,12 @@
 import "dotenv/config";
-import { bot } from "./bot.js";
-import { startScheduler } from "./scheduler.js";
+import { bot } from "./bot";
+import { startScheduler } from "./scheduler";
 
 async function main() {
-  startScheduler(bot);
+  await startScheduler(bot);
   // bot.launch() резолва чак при спиране (long polling), затова не го await-ваме.
   bot.launch();
-  console.log("Коуч-ботът е стартиран и слуша 🚀");
+  console.log("Коуч-ботът е стартиран и слуша.");
 }
 
 process.once("SIGINT", () => bot.stop("SIGINT"));

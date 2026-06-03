@@ -1,26 +1,17 @@
 import "dotenv/config";
 import { Telegraf, Markup } from "telegraf";
-import { chat, MODEL_FAST, MODEL_DEEP, type ChatMsg } from "./openai.js";
 import {
-  ONBOARDING,
-  DAILY_CHAT,
-  DEEP_SESSION,
-  EXTRACT_PROFILE,
-  buildContext,
-} from "./prompts.js";
+  endDeep,
+  finalizeOnboarding,
+  handleUserMessage,
+  startDeep,
+  startOnboarding,
+} from "./core/coach";
 import {
-  getOrCreateUser,
-  setStage,
-  setMode,
-  saveMessage,
-  recentMessages,
-  getProfile,
+  createLinkCode,
   getHabits,
-  getInsights,
-  addInsight,
-  saveExtractedProfile,
-  type ExtractedProfile,
-} from "./memory.js";
+  getOrCreateUser,
+} from "./memory";
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
   throw new Error("Липсва TELEGRAM_BOT_TOKEN в .env");
@@ -28,42 +19,31 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 export const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
-// Построява системния промпт + контекст от паметта за "завършените" потребители.
-async function systemWithContext(userId: number, base: string): Promise<string> {
-  const [profile, habits, insights] = await Promise.all([
-    getProfile(userId),
-    getHabits(userId),
-    getInsights(userId),
-  ]);
-  const ctx = buildContext(profile, habits, insights);
-  return ctx ? `${base}\n\n${ctx}` : base;
-}
-
-// Генерира отговор от модела на база историята и системния промпт, и го запазва.
-async function respond(
-  userId: number,
-  system: string,
-  kind: string,
-  model: string
-): Promise<string> {
-  const history = await recentMessages(userId);
-  const messages: ChatMsg[] = [{ role: "system", content: system }, ...history];
-  const reply = await chat(messages, { model, temperature: 0.7 });
-  await saveMessage(userId, "assistant", reply, kind);
-  return reply;
-}
-
 const finalizeButton = Markup.inlineKeyboard([
-  Markup.button.callback("✅ Готови сме — обобщи и постави цели", "finalize"),
+  Markup.button.callback("Готови сме — обобщи и постави цели", "finalize"),
 ]);
 
 const deepEndButton = Markup.inlineKeyboard([
-  Markup.button.callback("🏁 Приключи дълбоката сесия", "end_deep"),
+  Markup.button.callback("Приключи дълбоката сесия", "end_deep"),
 ]);
 
 const offerDeepButton = Markup.inlineKeyboard([
-  Markup.button.callback("🧠 Да, нека влезем дълбоко", "start_deep"),
+  Markup.button.callback("Да, нека влезем дълбоко", "start_deep"),
 ]);
+
+// Връща клавиатурата (ако има), която ще покажем след отговор.
+function keyboardFor(stage: string, offerDeep?: boolean) {
+  if (stage === "onboarding") return finalizeButton;
+  if (stage === "deep") return deepEndButton;
+  if (offerDeep) return offerDeepButton;
+  return undefined;
+}
+
+async function send(ctx: any, text: string, stage: string, offerDeep?: boolean) {
+  const kb = keyboardFor(stage, offerDeep);
+  if (kb) await ctx.reply(text, kb);
+  else await ctx.reply(text);
+}
 
 bot.start(async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
@@ -73,10 +53,8 @@ bot.start(async (ctx) => {
     );
     return;
   }
-  await setStage(user.id, "interview");
-  await setMode(user.id, "idle");
-  const reply = await respond(user.id, ONBOARDING, "onboarding", MODEL_DEEP);
-  await ctx.reply(reply, finalizeButton);
+  const reply = await startOnboarding(user.id);
+  await send(ctx, reply.text, reply.stage);
 });
 
 bot.help(async (ctx) => {
@@ -89,6 +67,7 @@ bot.help(async (ctx) => {
       "/end — приключи дълбоката сесия",
       "/habits — виж активните си навици",
       "/checkins on|off — включи/изключи проактивните напомняния",
+      "/link — свържи Telegram с уеб профила си",
       "/reset — започни опознаването наново",
     ].join("\n")
   );
@@ -97,24 +76,17 @@ bot.help(async (ctx) => {
 bot.command("deep", async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
   if (user.onboardingStage !== "done") {
-    await ctx.reply("Нека първо завършим опознаването 🙂");
+    await ctx.reply("Нека първо завършим опознаването.");
     return;
   }
-  await setMode(user.id, "deep");
-  const system = await systemWithContext(user.id, DEEP_SESSION);
-  await saveMessage(
-    user.id,
-    "user",
-    "[Потребителят започна дълбока сесия]",
-    "deep"
-  );
-  const reply = await respond(user.id, system, "deep", MODEL_DEEP);
-  await ctx.reply(reply, deepEndButton);
+  const reply = await startDeep(user.id);
+  await send(ctx, reply.text, reply.stage);
 });
 
 bot.command("end", async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  await endDeepSession(ctx, user.id);
+  const reply = await endDeep(user.id);
+  await send(ctx, reply.text, reply.stage);
 });
 
 bot.command("habits", async (ctx) => {
@@ -129,7 +101,7 @@ bot.command("habits", async (ctx) => {
       habits
         .map(
           (h, i) =>
-            `${i + 1}. ${h.name} (${h.cadence})${h.identityLink ? `\n   → ${h.identityLink}` : ""}`
+            `${i + 1}. ${h.name} (${h.cadence})${h.identityLink ? `\n   -> ${h.identityLink}` : ""}`
         )
         .join("\n")
   );
@@ -149,37 +121,48 @@ bot.command("checkins", async (ctx) => {
     .update(usersTable)
     .set({ morningCheckin: on, eveningCheckin: on })
     .where(eq(usersTable.id, user.id));
-  await ctx.reply(on ? "Напомнянията са ВКЛЮЧЕНИ ✅" : "Напомнянията са ИЗКЛЮЧЕНИ 🔕");
+  await ctx.reply(on ? "Напомнянията са ВКЛЮЧЕНИ." : "Напомнянията са ИЗКЛЮЧЕНИ.");
+});
+
+bot.command("link", async (ctx) => {
+  const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  const code = await createLinkCode(user.id, "link", 15);
+  await ctx.reply(
+    [
+      "Свържи този Telegram акаунт с уеб профила си.",
+      "",
+      `Код: ${code}`,
+      "",
+      "Влез в сайта, отвори 'Свържи Telegram' и въведи кода. Валиден е 15 минути.",
+    ].join("\n")
+  );
 });
 
 bot.command("reset", async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  await setStage(user.id, "interview");
-  await setMode(user.id, "idle");
-  const reply = await respond(user.id, ONBOARDING, "onboarding", MODEL_DEEP);
-  await ctx.reply(reply, finalizeButton);
+  const reply = await startOnboarding(user.id);
+  await send(ctx, reply.text, reply.stage);
 });
 
 bot.action("finalize", async (ctx) => {
   await ctx.answerCbQuery("Обобщавам...");
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  await finalizeOnboarding(ctx, user.id);
+  const reply = await finalizeOnboarding(user.id);
+  await send(ctx, reply.text, reply.stage);
 });
 
 bot.action("start_deep", async (ctx) => {
   await ctx.answerCbQuery();
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  await setMode(user.id, "deep");
-  const system = await systemWithContext(user.id, DEEP_SESSION);
-  await saveMessage(user.id, "user", "[Потребителят прие дълбока сесия]", "deep");
-  const reply = await respond(user.id, system, "deep", MODEL_DEEP);
-  await ctx.reply(reply, deepEndButton);
+  const reply = await startDeep(user.id);
+  await send(ctx, reply.text, reply.stage);
 });
 
 bot.action("end_deep", async (ctx) => {
   await ctx.answerCbQuery();
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  await endDeepSession(ctx, user.id);
+  const reply = await endDeep(user.id);
+  await send(ctx, reply.text, reply.stage);
 });
 
 bot.on("text", async (ctx) => {
@@ -187,116 +170,9 @@ bot.on("text", async (ctx) => {
   if (text.startsWith("/")) return;
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
   await ctx.sendChatAction("typing");
-
-  if (user.onboardingStage !== "done") {
-    await saveMessage(user.id, "user", text, "onboarding");
-    const reply = await respond(user.id, ONBOARDING, "onboarding", MODEL_DEEP);
-    await ctx.reply(reply, finalizeButton);
-    return;
-  }
-
-  if (user.mode === "deep") {
-    await saveMessage(user.id, "user", text, "deep");
-    const system = await systemWithContext(user.id, DEEP_SESSION);
-    const reply = await respond(user.id, system, "deep", MODEL_DEEP);
-    await ctx.reply(reply, deepEndButton);
-    return;
-  }
-
-  await saveMessage(user.id, "user", text, "chat");
-  const system = await systemWithContext(user.id, DAILY_CHAT);
-  const reply = await respond(user.id, system, "chat", MODEL_FAST);
-  if (suggestsDeep(reply)) {
-    await ctx.reply(reply, offerDeepButton);
-  } else {
-    await ctx.reply(reply);
-  }
+  const reply = await handleUserMessage(user.id, text, {
+    onboardingStage: user.onboardingStage,
+    mode: user.mode,
+  });
+  await send(ctx, reply.text, reply.stage, reply.offerDeep);
 });
-
-// Дали отговорът предлага дълбока сесия (за да покажем бутон).
-function suggestsDeep(reply: string): boolean {
-  const r = reply.toLowerCase();
-  return (
-    r.includes("дълбок") &&
-    (r.includes("сесия") || r.includes("разнищ") || r.includes("разговор"))
-  );
-}
-
-async function endDeepSession(ctx: any, userId: number) {
-  await setMode(userId, "idle");
-  const history = await recentMessages(userId, 30);
-  if (history.length) {
-    try {
-      const insight = await chat(
-        [
-          {
-            role: "system",
-            content:
-              "От разговора по-долу извлечи едно кратко (1-2 изречения) ключово прозрение/преформулирано вярване на български. Върни само прозрението, без увод.",
-          },
-          {
-            role: "user",
-            content: history.map((m) => `${m.role}: ${m.content}`).join("\n"),
-          },
-        ],
-        { model: MODEL_FAST, temperature: 0.3 }
-      );
-      if (insight) await addInsight(userId, insight);
-      await ctx.reply(
-        `Записах прозрението от тази сесия 🧠:\n"${insight}"\n\nЩе го помня и ще го свържа следващия път.`
-      );
-    } catch {
-      await ctx.reply("Сесията приключи. Връщам се в нормален режим.");
-    }
-  } else {
-    await ctx.reply("Сесията приключи. Връщам се в нормален режим.");
-  }
-}
-
-async function finalizeOnboarding(ctx: any, userId: number) {
-  const history = await recentMessages(userId, 40);
-  const transcript = history.map((m) => `${m.role}: ${m.content}`).join("\n");
-  let data: ExtractedProfile = {};
-  try {
-    const raw = await chat(
-      [
-        { role: "system", content: EXTRACT_PROFILE },
-        { role: "user", content: transcript },
-      ],
-      { model: MODEL_DEEP, temperature: 0.2 }
-    );
-    const cleaned = raw
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```\s*$/i, "")
-      .trim();
-    data = JSON.parse(cleaned);
-  } catch {
-    await ctx.reply(
-      "Не успях да структурирам напълно. Нека довършим разговора още малко и пробвай отново."
-    );
-    return;
-  }
-
-  await saveExtractedProfile(userId, data);
-  await setStage(userId, "done");
-  await setMode(userId, "idle");
-
-  const lines: string[] = ["Ето какво разбрах и целите, които поставяме заедно:\n"];
-  if (data.identityTarget)
-    lines.push(`🎯 Нова идентичност: ${data.identityTarget}`);
-  if (data.beliefsNew) lines.push(`💡 Нови вярвания: ${data.beliefsNew}`);
-  if (data.goals) lines.push(`🧭 Цели: ${data.goals}`);
-  if (data.habits?.length) {
-    lines.push(
-      "\n🔁 Навици, които градим:\n" +
-        data.habits
-          .map((h, i) => `${i + 1}. ${h.name}${h.identityLink ? ` → ${h.identityLink}` : ""}`)
-          .join("\n")
-    );
-  }
-  lines.push(
-    "\nОт сега ще ти пиша сутрин за фокус и вечер за рефлексия. Когато усетиш съпротива или искаш да разнищим нещо — /deep. Да започваме 💪"
-  );
-  await ctx.reply(lines.join("\n"));
-}

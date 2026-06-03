@@ -1,4 +1,4 @@
-import type { Profile, Habit } from "./db/schema.js";
+import type { Profile, Habit } from "./db/schema";
 
 // Общата "личност" и методология на коуча. Влиза във всеки разговор.
 export const BASE_COACH = `Ти си личен коуч за промяна на навици, вярвания и идентичност.

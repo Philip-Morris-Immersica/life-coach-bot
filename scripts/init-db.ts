@@ -1,13 +1,18 @@
 import "dotenv/config";
 import { sql } from "drizzle-orm";
-import { db } from "../src/db/index.js";
+import { db } from "../src/db/index";
 
 // Създава таблиците на коуча (префикс lc_) в съществуващата Neon база,
-// без да пипа таблиците на другите проекти. Идемпотентно (IF NOT EXISTS).
+// без да пипа таблиците на другите проекти. Идемпотентно (IF NOT EXISTS,
+// ADD COLUMN IF NOT EXISTS, DROP NOT NULL).
 const statements = [
+  // --- Основни таблици ---
   `CREATE TABLE IF NOT EXISTS lc_users (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    telegram_id bigint NOT NULL UNIQUE,
+    telegram_id bigint UNIQUE,
+    email varchar(255) UNIQUE,
+    password_hash text,
+    is_admin boolean NOT NULL DEFAULT false,
     name varchar(255),
     onboarding_stage varchar(20) NOT NULL DEFAULT 'new',
     morning_checkin boolean NOT NULL DEFAULT true,
@@ -16,6 +21,13 @@ const statements = [
     last_active_at timestamp NOT NULL DEFAULT now(),
     created_at timestamp NOT NULL DEFAULT now()
   )`,
+  // Миграция за бази, в които lc_users е създадена със стария scheme
+  // (telegram_id NOT NULL, без email/password/is_admin).
+  `ALTER TABLE lc_users ALTER COLUMN telegram_id DROP NOT NULL`,
+  `ALTER TABLE lc_users ADD COLUMN IF NOT EXISTS email varchar(255) UNIQUE`,
+  `ALTER TABLE lc_users ADD COLUMN IF NOT EXISTS password_hash text`,
+  `ALTER TABLE lc_users ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false`,
+
   `CREATE TABLE IF NOT EXISTS lc_profiles (
     user_id integer PRIMARY KEY REFERENCES lc_users(id) ON DELETE CASCADE,
     identity_current text NOT NULL DEFAULT '',
@@ -58,14 +70,44 @@ const statements = [
     content text NOT NULL,
     created_at timestamp NOT NULL DEFAULT now()
   )`,
+
+  // --- Нови таблици за уеб + админ ---
+  `CREATE TABLE IF NOT EXISTS lc_link_codes (
+    code varchar(16) PRIMARY KEY,
+    user_id integer NOT NULL REFERENCES lc_users(id) ON DELETE CASCADE,
+    purpose varchar(20) NOT NULL DEFAULT 'link',
+    expires_at timestamp NOT NULL,
+    used_at timestamp,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS lc_settings (
+    key varchar(32) PRIMARY KEY,
+    data jsonb NOT NULL,
+    updated_at timestamp NOT NULL DEFAULT now()
+  )`,
 ];
 
 async function main() {
   for (const stmt of statements) {
-    await db.execute(sql.raw(stmt));
-    console.log("OK:", stmt.split("(")[0].trim());
+    try {
+      await db.execute(sql.raw(stmt));
+      console.log("OK:", stmt.split("\n")[0].trim().slice(0, 80));
+    } catch (err: any) {
+      // ALTER COLUMN DROP NOT NULL дава грешка ако колоната вече е nullable —
+      // безопасно е да го игнорираме при идемпотентен пуск.
+      if (err?.code === "42P07" || err?.code === "42710") {
+        console.log("SKIP (already exists):", stmt.split("\n")[0].slice(0, 80));
+      } else if (
+        err?.message?.includes("is already") ||
+        err?.message?.includes("not null")
+      ) {
+        console.log("SKIP:", stmt.split("\n")[0].slice(0, 80));
+      } else {
+        throw err;
+      }
+    }
   }
-  console.log("Готово — всички lc_ таблици са създадени.");
+  console.log("Готово — всички lc_ таблици/колони са синхронизирани.");
 }
 
 main()
