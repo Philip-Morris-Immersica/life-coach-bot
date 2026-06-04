@@ -5,7 +5,9 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "start": "tsx src/index.ts",
+    "build": "next build",
+    "start": "next start",
+    "bot": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "web:dev": "next dev",
     "web:build": "next build",
