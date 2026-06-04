@@ -1,7 +1,8 @@
 import Link from "next/link";
-import { desc, eq, sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import { requireAdmin } from "@/lib/session";
 import { db, messagesTable, usersTable } from "@/src/db";
+import AdminsForm from "./admins-form";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +10,7 @@ export default async function AdminHome() {
   await requireAdmin();
 
   // Базови статистики и потребители.
-  const [users, [{ total }], [{ totalMessages }]] = await Promise.all([
+  const [users, [{ total }], [{ totalMessages, totalCost }]] = await Promise.all([
     db
       .select({
         id: usersTable.id,
@@ -24,11 +25,12 @@ export default async function AdminHome() {
       .from(usersTable)
       .orderBy(desc(usersTable.lastActiveAt))
       .limit(100),
+    db.select({ total: sql<number>`count(*)::int` }).from(usersTable),
     db
-      .select({ total: sql<number>`count(*)::int` })
-      .from(usersTable),
-    db
-      .select({ totalMessages: sql<number>`count(*)::int` })
+      .select({
+        totalMessages: sql<number>`count(*)::int`,
+        totalCost: sql<number>`coalesce(sum(${messagesTable.costUsd}),0)`,
+      })
       .from(messagesTable),
   ]);
 
@@ -37,6 +39,9 @@ export default async function AdminHome() {
       <header className="flex items-center justify-between gap-3 flex-wrap">
         <h1 className="text-2xl font-semibold">Админ панел</h1>
         <nav className="flex gap-2">
+          <Link href="/admin/sessions" className="btn btn-ghost">
+            Сесии и разходи
+          </Link>
           <Link href="/admin/settings" className="btn">
             Настройки на бота
           </Link>
@@ -46,6 +51,16 @@ export default async function AdminHome() {
       <section className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <Stat label="Регистрирани" value={total} />
         <Stat label="Съобщения общо" value={totalMessages} />
+        <Stat label="Обща цена ($)" value={Number(totalCost).toFixed(4)} />
+      </section>
+
+      <section className="card">
+        <h2 className="font-semibold mb-2">Управление на админи</h2>
+        <p className="muted text-xs mb-3">
+          Дай или отнеми админски права по имейл (потребителят трябва вече да е
+          регистриран).
+        </p>
+        <AdminsForm />
       </section>
 
       <section className="card">
@@ -85,7 +100,7 @@ export default async function AdminHome() {
   );
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
+function Stat({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="card">
       <div className="text-2xl font-semibold">{value}</div>

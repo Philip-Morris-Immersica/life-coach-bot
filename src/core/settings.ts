@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 import { db, settingsTable } from "../db/index";
 import {
   ONBOARDING,
+  ORIENTATION,
   DEEP_SESSION,
   DAILY_CHAT,
   EXTRACT_PROFILE,
@@ -14,11 +15,12 @@ import {
   morningPrompt,
   eveningPrompt,
 } from "../prompts";
-import { MODEL_FAST, MODEL_DEEP } from "../openai";
+import { DEFAULT_FAST_MODEL, DEFAULT_DEEP_MODEL } from "../llm/models";
 
 export type Settings = {
   prompts: {
     base: string;
+    orientation: string;
     onboarding: string;
     deepSession: string;
     dailyChat: string;
@@ -48,6 +50,7 @@ export type Settings = {
 export const DEFAULT_SETTINGS: Settings = {
   prompts: {
     base: BASE_COACH,
+    orientation: ORIENTATION,
     onboarding: ONBOARDING,
     deepSession: DEEP_SESSION,
     dailyChat: DAILY_CHAT,
@@ -56,8 +59,8 @@ export const DEFAULT_SETTINGS: Settings = {
     evening: eveningPrompt(),
   },
   models: {
-    fast: MODEL_FAST,
-    deep: MODEL_DEEP,
+    fast: DEFAULT_FAST_MODEL,
+    deep: DEFAULT_DEEP_MODEL,
   },
   temperatures: {
     fast: 0.7,

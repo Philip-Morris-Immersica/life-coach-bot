@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { Settings } from "@/src/core/settings";
+import { MODELS } from "@/src/llm/models";
 
 export default function SettingsForm({ initial }: { initial: Settings }) {
   const [s, setS] = useState<Settings>(initial);
@@ -54,6 +55,11 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
           onChange={(v) => update("prompts", { base: v })}
         />
         <PromptField
+          label="Ориентация (първи контакт — роля, ползи, опции)"
+          value={s.prompts.orientation}
+          onChange={(v) => update("prompts", { orientation: v })}
+        />
+        <PromptField
           label="Опознавателна сесия (onboarding)"
           value={s.prompts.onboarding}
           onChange={(v) => update("prompts", { onboarding: v })}
@@ -86,22 +92,35 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
       </Section>
 
       <Section title="Модели">
+        <p className="muted text-xs">
+          Доставчикът (OpenAI / Anthropic) се избира автоматично според модела.
+        </p>
         <div className="grid sm:grid-cols-2 gap-3">
-          <Field label="Бърз модел (ежедневен чат, check-in-и)">
-            <input
+          <Field label="Бърз модел (ежедневен чат, напомняния)">
+            <select
               className="input"
               value={s.models.fast}
               onChange={(e) => update("models", { fast: e.target.value })}
-              placeholder="gpt-4o-mini"
-            />
+            >
+              {MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
           </Field>
-          <Field label="Дълбок модел (onboarding, дълбоки сесии)">
-            <input
+          <Field label="Дълбок модел (ориентация, сесии)">
+            <select
               className="input"
               value={s.models.deep}
               onChange={(e) => update("models", { deep: e.target.value })}
-              placeholder="gpt-4o"
-            />
+            >
+              {MODELS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
           </Field>
         </div>
       </Section>
@@ -212,8 +231,9 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
           </Field>
         </div>
         <p className="muted text-xs mt-2">
-          След промяна на времена/timezone, рестартирай бота (Railway -&gt; Restart),
-          за да се пренапише cron разписанието.
+          Забележка: персоналните напомняния вече се управляват от коуча според
+          разговора (на потребител). Тези глобални стойности са само резервни
+          дефолти.
         </p>
       </Section>
 

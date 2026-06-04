@@ -5,12 +5,14 @@ import {
   finalizeOnboarding,
   handleUserMessage,
   startDeep,
-  startOnboarding,
+  startOrientation,
+  type CoachReply,
 } from "./core/coach";
 import {
   createLinkCode,
   getHabits,
   getOrCreateUser,
+  listReminders,
 } from "./memory";
 
 if (!process.env.TELEGRAM_BOT_TOKEN) {
@@ -19,28 +21,38 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 export const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
-const finalizeButton = Markup.inlineKeyboard([
-  Markup.button.callback("Готови сме — обобщи и постави цели", "finalize"),
-]);
-
-const deepEndButton = Markup.inlineKeyboard([
-  Markup.button.callback("Приключи дълбоката сесия", "end_deep"),
-]);
-
-const offerDeepButton = Markup.inlineKeyboard([
-  Markup.button.callback("Да, нека влезем дълбоко", "start_deep"),
-]);
-
-// Връща клавиатурата (ако има), която ще покажем след отговор.
-function keyboardFor(stage: string, offerDeep?: boolean) {
-  if (stage === "onboarding") return finalizeButton;
-  if (stage === "deep") return deepEndButton;
-  if (offerDeep) return offerDeepButton;
-  return undefined;
+// Строи inline клавиатура спрямо отговора (опции, предложение за сесия, етап).
+function keyboardFor(reply: CoachReply) {
+  const rows: any[] = [];
+  if (reply.options?.items?.length) {
+    for (const o of reply.options.items) {
+      const data = `opt:${o.value}`.slice(0, 60);
+      rows.push([Markup.button.callback(o.label, data)]);
+    }
+  }
+  if (reply.offer) {
+    const label =
+      reply.offer.type === "short" ? "Кратка сесия" : "Дълбока сесия";
+    rows.push([Markup.button.callback(`Започни: ${label}`, "start_deep")]);
+  }
+  if (reply.stage === "onboarding") {
+    rows.push([
+      Markup.button.callback("Готови сме — обобщи и постави цели", "finalize"),
+    ]);
+  }
+  if (reply.stage === "deep") {
+    rows.push([Markup.button.callback("Приключи дълбоката сесия", "end_deep")]);
+  }
+  return rows.length ? Markup.inlineKeyboard(rows) : undefined;
 }
 
-async function send(ctx: any, text: string, stage: string, offerDeep?: boolean) {
-  const kb = keyboardFor(stage, offerDeep);
+async function send(ctx: any, reply: CoachReply) {
+  // Ако коучът предлага сесия, добавяме кратко защо + линк към уеб.
+  let text = reply.text;
+  if (reply.offer?.reason) {
+    text += `\n\n${reply.offer.reason}`;
+  }
+  const kb = keyboardFor(reply);
   if (kb) await ctx.reply(text, kb);
   else await ctx.reply(text);
 }
@@ -53,75 +65,80 @@ bot.start(async (ctx) => {
     );
     return;
   }
-  const reply = await startOnboarding(user.id);
-  await send(ctx, reply.text, reply.stage);
+  const reply = await startOrientation(user.id);
+  await send(ctx, reply);
 });
 
 bot.help(async (ctx) => {
   await ctx.reply(
     [
-      "Аз съм твоят личен коуч за навици, вярвания и идентичност.",
+      "Аз съм твоят личен коуч и ментор за навици, вярвания и идентичност.",
       "",
       "Команди:",
       "/deep — започни дълбок коучинг разговор",
       "/end — приключи дълбоката сесия",
       "/habits — виж активните си навици",
-      "/checkins on|off — включи/изключи проактивните напомняния",
+      "/reminders — виж напомнянията си",
       "/link — свържи Telegram с уеб профила си",
-      "/reset — започни опознаването наново",
+      "/reset — започни наново",
     ].join("\n")
   );
 });
 
 bot.command("deep", async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  if (user.onboardingStage !== "done") {
-    await ctx.reply("Нека първо завършим опознаването.");
-    return;
-  }
   const reply = await startDeep(user.id);
-  await send(ctx, reply.text, reply.stage);
+  await send(ctx, reply);
 });
 
 bot.command("end", async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
   const reply = await endDeep(user.id);
-  await send(ctx, reply.text, reply.stage);
+  await send(ctx, reply);
 });
 
 bot.command("habits", async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
   const habits = await getHabits(user.id);
   if (!habits.length) {
-    await ctx.reply("Още нямаш активни навици. Започни с /start или /reset.");
+    await ctx.reply("Още нямаш активни навици. Започни с /start.");
+    return;
+  }
+  const building = habits.filter((h) => h.kind !== "limiting");
+  const limiting = habits.filter((h) => h.kind === "limiting");
+  const lines: string[] = [];
+  if (building.length) {
+    lines.push("Навици за изграждане:");
+    building.forEach((h, i) =>
+      lines.push(
+        `${i + 1}. ${h.name} (${h.cadence})${h.identityLink ? `\n   -> ${h.identityLink}` : ""}`
+      )
+    );
+  }
+  if (limiting.length) {
+    lines.push("\nОграничаващи навици:");
+    limiting.forEach((h, i) =>
+      lines.push(`${i + 1}. ${h.name}${h.trigger ? ` (тригер: ${h.trigger})` : ""}`)
+    );
+  }
+  await ctx.reply(lines.join("\n"));
+});
+
+bot.command("reminders", async (ctx) => {
+  const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  const list = await listReminders(user.id);
+  if (!list.length) {
+    await ctx.reply(
+      "Нямаш настроени напомняния. Кажи ми кога и за какво да ти пиша и ще ги настроя."
+    );
     return;
   }
   await ctx.reply(
-    "Активни навици:\n" +
-      habits
-        .map(
-          (h, i) =>
-            `${i + 1}. ${h.name} (${h.cadence})${h.identityLink ? `\n   -> ${h.identityLink}` : ""}`
-        )
+    "Напомняния:\n" +
+      list
+        .map((r) => `- ${r.time}${r.reason ? ` — ${r.reason}` : ""}`)
         .join("\n")
   );
-});
-
-bot.command("checkins", async (ctx) => {
-  const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  const arg = ctx.message.text.split(/\s+/)[1]?.toLowerCase();
-  if (arg !== "on" && arg !== "off") {
-    await ctx.reply("Ползвай: /checkins on  или  /checkins off");
-    return;
-  }
-  const { db, usersTable } = await import("./db/index.js");
-  const { eq } = await import("drizzle-orm");
-  const on = arg === "on";
-  await db
-    .update(usersTable)
-    .set({ morningCheckin: on, eveningCheckin: on })
-    .where(eq(usersTable.id, user.id));
-  await ctx.reply(on ? "Напомнянията са ВКЛЮЧЕНИ." : "Напомнянията са ИЗКЛЮЧЕНИ.");
 });
 
 bot.command("link", async (ctx) => {
@@ -140,29 +157,42 @@ bot.command("link", async (ctx) => {
 
 bot.command("reset", async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  const reply = await startOnboarding(user.id);
-  await send(ctx, reply.text, reply.stage);
+  const reply = await startOrientation(user.id);
+  await send(ctx, reply);
 });
 
 bot.action("finalize", async (ctx) => {
   await ctx.answerCbQuery("Обобщавам...");
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
   const reply = await finalizeOnboarding(user.id);
-  await send(ctx, reply.text, reply.stage);
+  await send(ctx, reply);
 });
 
 bot.action("start_deep", async (ctx) => {
   await ctx.answerCbQuery();
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
   const reply = await startDeep(user.id);
-  await send(ctx, reply.text, reply.stage);
+  await send(ctx, reply);
 });
 
 bot.action("end_deep", async (ctx) => {
   await ctx.answerCbQuery();
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
   const reply = await endDeep(user.id);
-  await send(ctx, reply.text, reply.stage);
+  await send(ctx, reply);
+});
+
+// Клик върху динамична опция → третираме стойността като съобщение.
+bot.action(/^opt:(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const value = ctx.match[1];
+  const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  await ctx.sendChatAction("typing");
+  const reply = await handleUserMessage(user.id, value, {
+    onboardingStage: user.onboardingStage,
+    mode: user.mode,
+  });
+  await send(ctx, reply);
 });
 
 bot.on("text", async (ctx) => {
@@ -174,5 +204,5 @@ bot.on("text", async (ctx) => {
     onboardingStage: user.onboardingStage,
     mode: user.mode,
   });
-  await send(ctx, reply.text, reply.stage, reply.offerDeep);
+  await send(ctx, reply);
 });

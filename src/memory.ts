@@ -1,12 +1,16 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import {
   db,
   usersTable,
   profilesTable,
   habitsTable,
+  sessionsTable,
   messagesTable,
+  remindersTable,
   insightsTable,
   type User,
+  type Session,
+  type Reminder,
 } from "./db/index";
 import type { ChatMsg } from "./openai";
 
@@ -192,15 +196,35 @@ export async function setMode(userId: number, mode: string) {
   await db.update(usersTable).set({ mode }).where(eq(usersTable.id, userId));
 }
 
+export type MessageTelemetry = {
+  sessionId?: string | null;
+  model?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  costUsd?: number;
+};
+
 export async function saveMessage(
   userId: number,
   role: "user" | "assistant",
   content: string,
-  kind = "chat"
+  kind = "chat",
+  extra: MessageTelemetry = {}
 ) {
-  await db.insert(messagesTable).values({ userId, role, content, kind });
+  await db.insert(messagesTable).values({
+    userId,
+    role,
+    content,
+    kind,
+    sessionId: extra.sessionId ?? null,
+    model: extra.model ?? "",
+    promptTokens: extra.promptTokens ?? 0,
+    completionTokens: extra.completionTokens ?? 0,
+    costUsd: extra.costUsd ?? 0,
+  });
 }
 
+// Последни съобщения от ежедневния поток (session_id IS NULL).
 export async function recentMessages(
   userId: number,
   limit = 12
@@ -208,12 +232,196 @@ export async function recentMessages(
   const rows = await db
     .select()
     .from(messagesTable)
-    .where(eq(messagesTable.userId, userId))
+    .where(
+      and(eq(messagesTable.userId, userId), isNull(messagesTable.sessionId))
+    )
     .orderBy(desc(messagesTable.createdAt))
     .limit(limit);
   return rows
     .reverse()
     .map((r) => ({ role: r.role as "user" | "assistant", content: r.content }));
+}
+
+// Съобщенията в конкретна сесия (хронологично).
+export async function sessionMessages(
+  sessionId: string,
+  limit = 60
+): Promise<ChatMsg[]> {
+  const rows = await db
+    .select()
+    .from(messagesTable)
+    .where(eq(messagesTable.sessionId, sessionId))
+    .orderBy(desc(messagesTable.createdAt))
+    .limit(limit);
+  return rows
+    .reverse()
+    .map((r) => ({ role: r.role as "user" | "assistant", content: r.content }));
+}
+
+// ---- Сесии ----
+
+export async function createSession(
+  userId: number,
+  type: "onboarding" | "deep",
+  focus = ""
+): Promise<Session> {
+  const rows = await db
+    .insert(sessionsTable)
+    .values({ userId, type, focus, status: "active" })
+    .returning();
+  return rows[0];
+}
+
+export async function getActiveSession(
+  userId: number,
+  type?: "onboarding" | "deep"
+): Promise<Session | undefined> {
+  const conds = [
+    eq(sessionsTable.userId, userId),
+    eq(sessionsTable.status, "active"),
+  ];
+  if (type) conds.push(eq(sessionsTable.type, type));
+  const rows = await db
+    .select()
+    .from(sessionsTable)
+    .where(and(...conds))
+    .orderBy(desc(sessionsTable.startedAt))
+    .limit(1);
+  return rows[0];
+}
+
+export async function getSessionById(
+  id: string
+): Promise<Session | undefined> {
+  const rows = await db
+    .select()
+    .from(sessionsTable)
+    .where(eq(sessionsTable.id, id))
+    .limit(1);
+  return rows[0];
+}
+
+export async function getUserSessions(userId: number): Promise<Session[]> {
+  return db
+    .select()
+    .from(sessionsTable)
+    .where(eq(sessionsTable.userId, userId))
+    .orderBy(desc(sessionsTable.startedAt));
+}
+
+export async function completeSession(
+  id: string,
+  patch: { summary?: string; title?: string; focus?: string }
+) {
+  await db
+    .update(sessionsTable)
+    .set({
+      status: "completed",
+      endedAt: new Date(),
+      ...(patch.summary !== undefined ? { summary: patch.summary } : {}),
+      ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.focus ? { focus: patch.focus } : {}),
+    })
+    .where(eq(sessionsTable.id, id));
+}
+
+// ---- Напомняния ----
+
+export async function listReminders(
+  userId: number,
+  onlyActive = true
+): Promise<Reminder[]> {
+  const conds = [eq(remindersTable.userId, userId)];
+  if (onlyActive) conds.push(eq(remindersTable.active, true));
+  return db
+    .select()
+    .from(remindersTable)
+    .where(and(...conds))
+    .orderBy(remindersTable.time);
+}
+
+export async function upsertReminder(
+  userId: number,
+  data: {
+    id?: string;
+    time: string;
+    days?: string;
+    reason?: string;
+    promptHint?: string;
+    active?: boolean;
+  }
+): Promise<Reminder> {
+  if (data.id) {
+    const rows = await db
+      .update(remindersTable)
+      .set({
+        time: data.time,
+        ...(data.days !== undefined ? { days: data.days } : {}),
+        ...(data.reason !== undefined ? { reason: data.reason } : {}),
+        ...(data.promptHint !== undefined
+          ? { promptHint: data.promptHint }
+          : {}),
+        ...(data.active !== undefined ? { active: data.active } : {}),
+      })
+      .where(
+        and(eq(remindersTable.id, data.id), eq(remindersTable.userId, userId))
+      )
+      .returning();
+    if (rows[0]) return rows[0];
+  }
+  const rows = await db
+    .insert(remindersTable)
+    .values({
+      userId,
+      time: data.time,
+      days: data.days ?? "*",
+      reason: data.reason ?? "",
+      promptHint: data.promptHint ?? "",
+      active: data.active ?? true,
+    })
+    .returning();
+  return rows[0];
+}
+
+export async function removeReminder(userId: number, id: string) {
+  await db
+    .delete(remindersTable)
+    .where(and(eq(remindersTable.id, id), eq(remindersTable.userId, userId)));
+}
+
+export async function markReminderSent(id: string, dateStr: string) {
+  await db
+    .update(remindersTable)
+    .set({ lastSentOn: dateStr })
+    .where(eq(remindersTable.id, id));
+}
+
+// Всички активни напомняния (за scheduler-а) — заедно с часовата зона и
+// telegram_id на потребителя.
+export async function allActiveReminders(): Promise<
+  (Reminder & { timezone: string; telegramId: number | null })[]
+> {
+  const rows = await db
+    .select({
+      reminder: remindersTable,
+      timezone: usersTable.timezone,
+      telegramId: usersTable.telegramId,
+    })
+    .from(remindersTable)
+    .innerJoin(usersTable, eq(remindersTable.userId, usersTable.id))
+    .where(eq(remindersTable.active, true));
+  return rows.map((r) => ({
+    ...r.reminder,
+    timezone: r.timezone,
+    telegramId: r.telegramId,
+  }));
+}
+
+export async function setUserTimezone(userId: number, timezone: string) {
+  await db
+    .update(usersTable)
+    .set({ timezone })
+    .where(eq(usersTable.id, userId));
 }
 
 export async function getProfile(userId: number) {
@@ -230,6 +438,124 @@ export async function getHabits(userId: number) {
     .select()
     .from(habitsTable)
     .where(and(eq(habitsTable.userId, userId), eq(habitsTable.active, true)));
+}
+
+// Patch на отделни полета на профила (ползва се от инструмента update_profile).
+export type ProfilePatch = {
+  identityCurrent?: string;
+  identityTarget?: string;
+  beliefsLimiting?: string;
+  beliefsNew?: string;
+  story?: string;
+  problems?: string;
+  goals?: string;
+  vision?: string;
+  focus?: string;
+};
+
+export async function updateProfileFields(userId: number, patch: ProfilePatch) {
+  await ensureProfileRow(userId);
+  const set: Record<string, unknown> = { updatedAt: new Date() };
+  for (const [k, v] of Object.entries(patch)) {
+    if (typeof v === "string" && v.trim() !== "") set[k] = v;
+  }
+  if (Object.keys(set).length === 1) return; // само updatedAt
+  await db
+    .update(profilesTable)
+    .set(set)
+    .where(eq(profilesTable.userId, userId));
+}
+
+export async function upsertHabit(
+  userId: number,
+  data: {
+    id?: string;
+    name: string;
+    kind?: "build" | "limiting";
+    trigger?: string;
+    identityLink?: string;
+    cadence?: string;
+  }
+) {
+  if (data.id) {
+    const rows = await db
+      .update(habitsTable)
+      .set({
+        name: data.name,
+        ...(data.kind ? { kind: data.kind } : {}),
+        ...(data.trigger !== undefined ? { trigger: data.trigger } : {}),
+        ...(data.identityLink !== undefined
+          ? { identityLink: data.identityLink }
+          : {}),
+        ...(data.cadence ? { cadence: data.cadence } : {}),
+        active: true,
+      })
+      .where(and(eq(habitsTable.id, data.id), eq(habitsTable.userId, userId)))
+      .returning();
+    if (rows[0]) return rows[0];
+  }
+  // Ако вече има активен навик със същото име — обновяваме него.
+  const existing = await db
+    .select()
+    .from(habitsTable)
+    .where(
+      and(
+        eq(habitsTable.userId, userId),
+        eq(habitsTable.name, data.name),
+        eq(habitsTable.active, true)
+      )
+    )
+    .limit(1);
+  if (existing[0]) {
+    const rows = await db
+      .update(habitsTable)
+      .set({
+        ...(data.kind ? { kind: data.kind } : {}),
+        ...(data.trigger !== undefined ? { trigger: data.trigger } : {}),
+        ...(data.identityLink !== undefined
+          ? { identityLink: data.identityLink }
+          : {}),
+        ...(data.cadence ? { cadence: data.cadence } : {}),
+      })
+      .where(eq(habitsTable.id, existing[0].id))
+      .returning();
+    return rows[0];
+  }
+  const rows = await db
+    .insert(habitsTable)
+    .values({
+      userId,
+      name: data.name,
+      kind: data.kind ?? "build",
+      trigger: data.trigger ?? "",
+      identityLink: data.identityLink ?? "",
+      cadence: data.cadence ?? "всеки ден",
+    })
+    .returning();
+  return rows[0];
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export async function deactivateHabit(userId: number, idOrName: string) {
+  // Първо опит по id (ако прилича на uuid), после по име.
+  if (UUID_RE.test(idOrName)) {
+    const byId = await db
+      .update(habitsTable)
+      .set({ active: false })
+      .where(and(eq(habitsTable.id, idOrName), eq(habitsTable.userId, userId)))
+      .returning();
+    if (byId[0]) return byId[0];
+  }
+  const byName = await db
+    .update(habitsTable)
+    .set({ active: false })
+    .where(
+      and(eq(habitsTable.userId, userId), eq(habitsTable.name, idOrName))
+    )
+    .returning();
+  return byName[0];
 }
 
 export async function getInsights(userId: number, limit = 8): Promise<string[]> {

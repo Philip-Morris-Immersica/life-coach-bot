@@ -5,7 +5,7 @@ import {
   finalizeOnboarding,
   handleUserMessage,
   startDeep,
-  startOnboarding,
+  startOrientation,
 } from "@/src/core/coach";
 import { getUserById } from "@/src/memory";
 
@@ -38,8 +38,8 @@ export async function POST(req: NextRequest) {
       });
       return NextResponse.json(reply);
     }
-    if (action === "start_onboarding") {
-      const reply = await startOnboarding(session.userId);
+    if (action === "start_orientation") {
+      const reply = await startOrientation(session.userId);
       return NextResponse.json(reply);
     }
     if (action === "finalize_onboarding") {
@@ -47,7 +47,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(reply);
     }
     if (action === "start_deep") {
-      const reply = await startDeep(session.userId);
+      const topic = String(body.topic || "").trim();
+      const reply = await startDeep(session.userId, topic);
       return NextResponse.json(reply);
     }
     if (action === "end_deep") {

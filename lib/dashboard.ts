@@ -8,12 +8,16 @@ import {
   insightsTable,
   messagesTable,
   profilesTable,
+  remindersTable,
+  sessionsTable,
   usersTable,
 } from "@/src/db";
 
 export type DashboardData = {
   profile: typeof profilesTable.$inferSelect | undefined;
   habits: (typeof habitsTable.$inferSelect)[];
+  reminders: (typeof remindersTable.$inferSelect)[];
+  sessions: (typeof sessionsTable.$inferSelect)[];
   insights: { id: string; content: string; createdAt: Date }[];
   stats: {
     totalMessages: number;
@@ -25,20 +29,32 @@ export type DashboardData = {
 };
 
 export async function getDashboardData(userId: number): Promise<DashboardData> {
-  const [profileRows, habitRows, insightRows, userRows] = await Promise.all([
-    db.select().from(profilesTable).where(eq(profilesTable.userId, userId)).limit(1),
-    db
-      .select()
-      .from(habitsTable)
-      .where(and(eq(habitsTable.userId, userId), eq(habitsTable.active, true))),
-    db
-      .select()
-      .from(insightsTable)
-      .where(eq(insightsTable.userId, userId))
-      .orderBy(desc(insightsTable.createdAt))
-      .limit(10),
-    db.select().from(usersTable).where(eq(usersTable.id, userId)).limit(1),
-  ]);
+  const [profileRows, habitRows, reminderRows, sessionRows, insightRows, userRows] =
+    await Promise.all([
+      db.select().from(profilesTable).where(eq(profilesTable.userId, userId)).limit(1),
+      db
+        .select()
+        .from(habitsTable)
+        .where(and(eq(habitsTable.userId, userId), eq(habitsTable.active, true))),
+      db
+        .select()
+        .from(remindersTable)
+        .where(and(eq(remindersTable.userId, userId), eq(remindersTable.active, true)))
+        .orderBy(remindersTable.time),
+      db
+        .select()
+        .from(sessionsTable)
+        .where(eq(sessionsTable.userId, userId))
+        .orderBy(desc(sessionsTable.startedAt))
+        .limit(5),
+      db
+        .select()
+        .from(insightsTable)
+        .where(eq(insightsTable.userId, userId))
+        .orderBy(desc(insightsTable.createdAt))
+        .limit(10),
+      db.select().from(usersTable).where(eq(usersTable.id, userId)).limit(1),
+    ]);
 
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
@@ -70,6 +86,8 @@ export async function getDashboardData(userId: number): Promise<DashboardData> {
   return {
     profile: profileRows[0],
     habits: habitRows,
+    reminders: reminderRows,
+    sessions: sessionRows,
     insights: insightRows.map((r) => ({
       id: r.id,
       content: r.content,

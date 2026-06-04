@@ -56,12 +56,57 @@ const statements = [
     note text,
     created_at timestamp NOT NULL DEFAULT now()
   )`,
+  // Часова зона на потребителя (за персоналните напомняния).
+  `ALTER TABLE lc_users ADD COLUMN IF NOT EXISTS timezone varchar(64) NOT NULL DEFAULT 'Europe/Sofia'`,
+  // Нови полета на профила.
+  `ALTER TABLE lc_profiles ADD COLUMN IF NOT EXISTS vision text NOT NULL DEFAULT ''`,
+  `ALTER TABLE lc_profiles ADD COLUMN IF NOT EXISTS focus varchar(40) NOT NULL DEFAULT ''`,
+  // Ограничаващи навици + тригери.
+  `ALTER TABLE lc_habits ADD COLUMN IF NOT EXISTS kind varchar(20) NOT NULL DEFAULT 'build'`,
+  `ALTER TABLE lc_habits ADD COLUMN IF NOT EXISTS trigger text NOT NULL DEFAULT ''`,
+
+  // Сесии (трябва преди lc_messages заради FK).
+  `CREATE TABLE IF NOT EXISTS lc_sessions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id integer NOT NULL REFERENCES lc_users(id) ON DELETE CASCADE,
+    type varchar(20) NOT NULL DEFAULT 'deep',
+    title varchar(300) NOT NULL DEFAULT '',
+    focus varchar(40) NOT NULL DEFAULT '',
+    status varchar(20) NOT NULL DEFAULT 'active',
+    summary text NOT NULL DEFAULT '',
+    started_at timestamp NOT NULL DEFAULT now(),
+    ended_at timestamp
+  )`,
   `CREATE TABLE IF NOT EXISTS lc_messages (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id integer NOT NULL REFERENCES lc_users(id) ON DELETE CASCADE,
+    session_id uuid REFERENCES lc_sessions(id) ON DELETE SET NULL,
     role varchar(20) NOT NULL,
     content text NOT NULL,
     kind varchar(20) NOT NULL DEFAULT 'chat',
+    model varchar(64) NOT NULL DEFAULT '',
+    prompt_tokens integer NOT NULL DEFAULT 0,
+    completion_tokens integer NOT NULL DEFAULT 0,
+    cost_usd double precision NOT NULL DEFAULT 0,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  // Миграция за съществуващи lc_messages таблици.
+  `ALTER TABLE lc_messages ADD COLUMN IF NOT EXISTS session_id uuid REFERENCES lc_sessions(id) ON DELETE SET NULL`,
+  `ALTER TABLE lc_messages ADD COLUMN IF NOT EXISTS model varchar(64) NOT NULL DEFAULT ''`,
+  `ALTER TABLE lc_messages ADD COLUMN IF NOT EXISTS prompt_tokens integer NOT NULL DEFAULT 0`,
+  `ALTER TABLE lc_messages ADD COLUMN IF NOT EXISTS completion_tokens integer NOT NULL DEFAULT 0`,
+  `ALTER TABLE lc_messages ADD COLUMN IF NOT EXISTS cost_usd double precision NOT NULL DEFAULT 0`,
+
+  // Персонални напомняния.
+  `CREATE TABLE IF NOT EXISTS lc_reminders (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id integer NOT NULL REFERENCES lc_users(id) ON DELETE CASCADE,
+    time varchar(5) NOT NULL,
+    days varchar(40) NOT NULL DEFAULT '*',
+    reason varchar(200) NOT NULL DEFAULT '',
+    prompt_hint text NOT NULL DEFAULT '',
+    active boolean NOT NULL DEFAULT true,
+    last_sent_on varchar(10) NOT NULL DEFAULT '',
     created_at timestamp NOT NULL DEFAULT now()
   )`,
   `CREATE TABLE IF NOT EXISTS lc_insights (

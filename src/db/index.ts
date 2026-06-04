@@ -17,10 +17,12 @@ export {
   profilesTable,
   habitsTable,
   checkInsTable,
+  sessionsTable,
   messagesTable,
+  remindersTable,
   insightsTable,
   linkCodesTable,
   settingsTable,
 } from "./schema";
 
-export type { User, Profile, Habit } from "./schema";
+export type { User, Profile, Habit, Session, Reminder } from "./schema";

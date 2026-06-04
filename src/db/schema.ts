@@ -1,6 +1,7 @@
 import {
   bigint,
   boolean,
+  doublePrecision,
   integer,
   jsonb,
   pgTable,
@@ -29,6 +30,8 @@ export const usersTable = pgTable("lc_users", {
   eveningCheckin: boolean("evening_checkin").notNull().default(true),
   // 'idle' (нормален режим) | 'deep' (тече дълбока сесия)
   mode: varchar({ length: 20 }).notNull().default("idle"),
+  // Часова зона на потребителя — за персоналните напомняния.
+  timezone: varchar({ length: 64 }).notNull().default("Europe/Sofia"),
   lastActiveAt: timestamp("last_active_at").notNull().defaultNow(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
@@ -46,6 +49,10 @@ export const profilesTable = pgTable("lc_profiles", {
   story: text().notNull().default(""),
   problems: text().notNull().default(""),
   goals: text().notNull().default(""),
+  // Богата визия за желаното бъдеще (текущо->желано състояние).
+  vision: text().notNull().default(""),
+  // Върху какво се фокусира човекът сега: 'habits' | 'goals' | 'beliefs' | 'identity'
+  focus: varchar({ length: 40 }).notNull().default(""),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
 
@@ -56,6 +63,10 @@ export const habitsTable = pgTable("lc_habits", {
     .notNull()
     .references(() => usersTable.id, { onDelete: "cascade" }),
   name: varchar({ length: 300 }).notNull(),
+  // 'build' (навик, който градим) | 'limiting' (ограничаващ/негативен навик)
+  kind: varchar({ length: 20 }).notNull().default("build"),
+  // За ограничаващите навици: тригерът/моментът, който ги предизвиква.
+  trigger: text().notNull().default(""),
   // С коя идентичност/вярване е свързан навикът
   identityLink: text("identity_link").notNull().default(""),
   // Свободен текст: напр. "всеки ден", "пн/ср/пт"
@@ -79,17 +90,65 @@ export const checkInsTable = pgTable("lc_check_ins", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
-// Пълен дневник на разговорите (памет)
+// Сесии — отделни, видими "срещи" (опознаване / дълбока работа). Ежедневният
+// чат не е сесия (session_id = null върху съобщенията).
+export const sessionsTable = pgTable("lc_sessions", {
+  id: uuid().primaryKey().defaultRandom(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => usersTable.id, { onDelete: "cascade" }),
+  // 'onboarding' | 'deep'
+  type: varchar({ length: 20 }).notNull().default("deep"),
+  title: varchar({ length: 300 }).notNull().default(""),
+  // Тема/фокус на сесията: 'habits' | 'goals' | 'beliefs' | 'identity' | ...
+  focus: varchar({ length: 40 }).notNull().default(""),
+  // 'active' | 'completed'
+  status: varchar({ length: 20 }).notNull().default("active"),
+  summary: text().notNull().default(""),
+  startedAt: timestamp("started_at").notNull().defaultNow(),
+  endedAt: timestamp("ended_at"),
+});
+
+// Пълен дневник на разговорите (памет) + телеметрия за модел/токени/цена.
 export const messagesTable = pgTable("lc_messages", {
   id: uuid().primaryKey().defaultRandom(),
   userId: integer("user_id")
     .notNull()
     .references(() => usersTable.id, { onDelete: "cascade" }),
+  // Към коя сесия принадлежи (null = ежедневен чат поток).
+  sessionId: uuid("session_id").references(() => sessionsTable.id, {
+    onDelete: "set null",
+  }),
   // 'user' | 'assistant'
   role: varchar({ length: 20 }).notNull(),
   content: text().notNull(),
   // 'chat' | 'checkin' | 'deep' | 'onboarding'
   kind: varchar({ length: 20 }).notNull().default("chat"),
+  // Телеметрия (попълва се за asistant съобщенията).
+  model: varchar({ length: 64 }).notNull().default(""),
+  promptTokens: integer("prompt_tokens").notNull().default(0),
+  completionTokens: integer("completion_tokens").notNull().default(0),
+  costUsd: doublePrecision("cost_usd").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+// Персонални динамични напомняния — раждат се от разговора, различни за всеки.
+export const remindersTable = pgTable("lc_reminders", {
+  id: uuid().primaryKey().defaultRandom(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => usersTable.id, { onDelete: "cascade" }),
+  // Локално време "HH:MM" (спрямо часовата зона на потребителя).
+  time: varchar({ length: 5 }).notNull(),
+  // Дни: "*" (всеки ден) или "mon,wed,fri".
+  days: varchar({ length: 40 }).notNull().default("*"),
+  // Кратка тема (напр. "медитация", "вечерен преглед").
+  reason: varchar({ length: 200 }).notNull().default(""),
+  // Насока към коуча какво да съдържа съобщението.
+  promptHint: text("prompt_hint").notNull().default(""),
+  active: boolean().notNull().default(true),
+  // Дата "YYYY-MM-DD", на която последно е изпратено (за дедупликация).
+  lastSentOn: varchar("last_sent_on", { length: 10 }).notNull().default(""),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -128,3 +187,5 @@ export const settingsTable = pgTable("lc_settings", {
 export type User = typeof usersTable.$inferSelect;
 export type Profile = typeof profilesTable.$inferSelect;
 export type Habit = typeof habitsTable.$inferSelect;
+export type Session = typeof sessionsTable.$inferSelect;
+export type Reminder = typeof remindersTable.$inferSelect;

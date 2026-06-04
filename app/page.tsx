@@ -1,3 +1,4 @@
+import type { ReactElement } from "react";
 import Link from "next/link";
 import { readSession } from "@/lib/auth";
 import { requireSession } from "@/lib/session";
@@ -5,8 +6,25 @@ import { getDashboardData } from "@/lib/dashboard";
 
 export const dynamic = "force-dynamic";
 
+const DAY_LABELS: Record<string, string> = {
+  mon: "пн",
+  tue: "вт",
+  wed: "ср",
+  thu: "чт",
+  fri: "пт",
+  sat: "сб",
+  sun: "нд",
+};
+
+function daysLabel(days: string): string {
+  if (!days || days === "*") return "всеки ден";
+  return days
+    .split(",")
+    .map((d) => DAY_LABELS[d.trim()] || d.trim())
+    .join(", ");
+}
+
 export default async function HomePage() {
-  // Ако не е логнат — кратко landing вместо да го пращаме директно на /login.
   const session = await readSession();
   if (!session) {
     return (
@@ -32,8 +50,102 @@ export default async function HomePage() {
 
   await requireSession();
   const data = await getDashboardData(session.userId);
-  const { profile, habits, insights, stats, user } = data;
+  const { profile, habits, reminders, sessions, insights, stats, user } = data;
   const onboardingDone = user?.onboardingStage === "done";
+
+  const buildHabits = habits.filter((h) => h.kind !== "limiting");
+  const limitingHabits = habits.filter((h) => h.kind === "limiting");
+  const focus = profile?.focus || "";
+
+  // Адаптивна подредба: каквото е фокусът на човека, изпъква първо.
+  const identityCard = (
+    <div className="card" key="identity">
+      <h2 className="font-semibold mb-2">Идентичност и цели</h2>
+      {profile && (profile.identityTarget || profile.goals || profile.vision) ? (
+        <dl className="space-y-2 text-sm">
+          {profile.identityTarget && (
+            <Field label="Целева идентичност" value={profile.identityTarget} />
+          )}
+          {profile.vision && <Field label="Визия" value={profile.vision} />}
+          {profile.identityCurrent && (
+            <Field label="Текуща идентичност" value={profile.identityCurrent} />
+          )}
+          {profile.goals && <Field label="Цели" value={profile.goals} />}
+          {profile.problems && (
+            <Field label="Проблеми/съпротиви" value={profile.problems} />
+          )}
+        </dl>
+      ) : (
+        <p className="muted text-sm">
+          Все още нямаме структуриран профил. Поговори с коуча в чата.
+        </p>
+      )}
+    </div>
+  );
+
+  const beliefsCard = (
+    <div className="card" key="beliefs">
+      <h2 className="font-semibold mb-2">Вярвания</h2>
+      {profile && (profile.beliefsNew || profile.beliefsLimiting) ? (
+        <dl className="space-y-2 text-sm">
+          {profile.beliefsNew && (
+            <Field label="Нови вярвания" value={profile.beliefsNew} />
+          )}
+          {profile.beliefsLimiting && (
+            <Field label="Ограничаващи вярвания" value={profile.beliefsLimiting} />
+          )}
+        </dl>
+      ) : (
+        <p className="muted text-sm">Още не сме работили върху вярвания.</p>
+      )}
+    </div>
+  );
+
+  const habitsCard = (
+    <div className="card" key="habits">
+      <h2 className="font-semibold mb-2">Навици</h2>
+      {buildHabits.length ? (
+        <ul className="space-y-2 text-sm">
+          {buildHabits.map((h) => (
+            <li key={h.id} className="flex flex-col">
+              <span className="font-medium">{h.name}</span>
+              <span className="muted text-xs">
+                {h.cadence}
+                {h.identityLink ? ` · ${h.identityLink}` : ""}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted text-sm">Все още няма активни навици.</p>
+      )}
+      {limitingHabits.length > 0 && (
+        <div className="mt-3 pt-3 border-t" style={{ borderColor: "var(--border)" }}>
+          <h3 className="muted text-xs uppercase tracking-wide mb-1">
+            Ограничаващи навици
+          </h3>
+          <ul className="space-y-1 text-sm">
+            {limitingHabits.map((h) => (
+              <li key={h.id}>
+                {h.name}
+                {h.trigger ? (
+                  <span className="muted text-xs"> · тригер: {h.trigger}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+
+  const cardsByFocus: Record<string, ReactElement[]> = {
+    habits: [habitsCard, identityCard, beliefsCard],
+    goals: [identityCard, habitsCard, beliefsCard],
+    identity: [identityCard, beliefsCard, habitsCard],
+    beliefs: [beliefsCard, identityCard, habitsCard],
+  };
+  const orderedCards = cardsByFocus[focus] || [identityCard, habitsCard, beliefsCard];
 
   return (
     <div className="space-y-6">
@@ -45,18 +157,17 @@ export default async function HomePage() {
           <p className="muted text-sm">
             {onboardingDone
               ? "Ето накъде сме се запътили заедно."
-              : "Започни опознавателната сесия, за да поставим цели."}
+              : "Поговори с коуча, за да оформим посоката."}
+            {focus ? ` Фокус: ${focus}.` : ""}
           </p>
         </div>
         <div className="flex gap-2">
           <Link href="/chat" className="btn">
-            {onboardingDone ? "Започни разговор" : "Започни опознаването"}
+            Започни разговор
           </Link>
-          {onboardingDone && (
-            <Link href="/chat?deep=1" className="btn btn-ghost">
-              Дълбока сесия
-            </Link>
-          )}
+          <Link href="/chat?deep=1" className="btn btn-ghost">
+            Дълбока сесия
+          </Link>
         </div>
       </section>
 
@@ -69,55 +180,48 @@ export default async function HomePage() {
         </section>
       )}
 
+      <section className="grid md:grid-cols-3 gap-4">{orderedCards}</section>
+
       <section className="grid md:grid-cols-2 gap-4">
         <div className="card">
-          <h2 className="font-semibold mb-2">Идентичност и цели</h2>
-          {profile && (profile.identityTarget || profile.goals) ? (
-            <dl className="space-y-2 text-sm">
-              {profile.identityTarget && (
-                <Field label="Целева идентичност" value={profile.identityTarget} />
-              )}
-              {profile.identityCurrent && (
-                <Field label="Текуща идентичност" value={profile.identityCurrent} />
-              )}
-              {profile.beliefsNew && (
-                <Field label="Нови вярвания" value={profile.beliefsNew} />
-              )}
-              {profile.beliefsLimiting && (
-                <Field
-                  label="Ограничаващи вярвания"
-                  value={profile.beliefsLimiting}
-                />
-              )}
-              {profile.goals && <Field label="Цели" value={profile.goals} />}
-              {profile.problems && (
-                <Field label="Проблеми/съпротиви" value={profile.problems} />
-              )}
-            </dl>
-          ) : (
-            <p className="muted text-sm">
-              Все още нямаме структуриран профил. Завърши опознавателната сесия
-              в чата.
-            </p>
-          )}
-        </div>
-
-        <div className="card">
-          <h2 className="font-semibold mb-2">Навици</h2>
-          {habits.length ? (
+          <h2 className="font-semibold mb-2">Напомняния</h2>
+          {reminders.length ? (
             <ul className="space-y-2 text-sm">
-              {habits.map((h) => (
-                <li key={h.id} className="flex flex-col">
-                  <span className="font-medium">{h.name}</span>
-                  <span className="muted text-xs">
-                    {h.cadence}
-                    {h.identityLink ? ` · ${h.identityLink}` : ""}
+              {reminders.map((r) => (
+                <li key={r.id} className="flex justify-between gap-2">
+                  <span className="font-medium">{r.time}</span>
+                  <span className="muted text-right">
+                    {r.reason || "напомняне"} · {daysLabel(r.days)}
                   </span>
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="muted text-sm">Все още няма активни навици.</p>
+            <p className="muted text-sm">
+              Няма настроени напомняния. Кажи на коуча кога и за какво да ти пише.
+            </p>
+          )}
+        </div>
+
+        <div className="card">
+          <h2 className="font-semibold mb-2">Последни сесии</h2>
+          {sessions.length ? (
+            <ul className="space-y-2 text-sm">
+              {sessions.map((s) => (
+                <li key={s.id}>
+                  <Link href={`/chat?session=${s.id}`} className="hover:opacity-80">
+                    <span className="font-medium">{s.title || "Сесия"}</span>
+                    <span className="muted text-xs">
+                      {" "}
+                      · {new Date(s.startedAt).toLocaleDateString("bg-BG")}
+                      {s.status === "active" ? " · активна" : ""}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted text-sm">Все още няма сесии.</p>
           )}
         </div>
       </section>
@@ -127,7 +231,11 @@ export default async function HomePage() {
         {insights.length ? (
           <ul className="space-y-3 text-sm">
             {insights.map((i) => (
-              <li key={i.id} className="border-l-2 pl-3" style={{ borderColor: "var(--accent)" }}>
+              <li
+                key={i.id}
+                className="border-l-2 pl-3"
+                style={{ borderColor: "var(--accent)" }}
+              >
                 <p>{i.content}</p>
                 <p className="muted text-xs">
                   {new Date(i.createdAt).toLocaleDateString("bg-BG")}
