@@ -23,8 +23,14 @@ export function scheduleIdFor(reminderId: string): string {
 
 // Публичният адрес, който QStash вика. Не работи с localhost.
 export function dispatchUrl(): string {
-  const base = (process.env.WEB_URL || "").replace(/\/+$/, "");
-  if (!base) throw new Error("WEB_URL не е зададен.");
+  // Във Vercel production адресът се предоставя автоматично без протокол.
+  // WEB_URL остава възможност за собствен домейн или друга платформа.
+  const vercelHost =
+    process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || "";
+  const base = (
+    process.env.WEB_URL || (vercelHost ? `https://${vercelHost}` : "")
+  ).replace(/\/+$/, "");
+  if (!base) throw new Error("Липсва публичен WEB_URL/Vercel адрес.");
   let host = "";
   try {
     host = new URL(base).hostname;
