@@ -3,25 +3,17 @@ import Link from "next/link";
 import { readSession } from "@/lib/auth";
 import { requireSession } from "@/lib/session";
 import { getDashboardData } from "@/lib/dashboard";
+import { describeDays, nextOccurrence } from "@/src/notifications/time";
+import HabitCheckins from "./habit-checkins";
 
 export const dynamic = "force-dynamic";
 
-const DAY_LABELS: Record<string, string> = {
-  mon: "пн",
-  tue: "вт",
-  wed: "ср",
-  thu: "чт",
-  fri: "пт",
-  sat: "сб",
-  sun: "нд",
-};
+const daysLabel = describeDays;
 
-function daysLabel(days: string): string {
-  if (!days || days === "*") return "всеки ден";
-  return days
-    .split(",")
-    .map((d) => DAY_LABELS[d.trim()] || d.trim())
-    .join(", ");
+function whenLabel(daysAhead: number, time: string): string {
+  if (daysAhead === 0) return `днес в ${time}`;
+  if (daysAhead === 1) return `утре в ${time}`;
+  return `след ${daysAhead} дни в ${time}`;
 }
 
 export default async function HomePage() {
@@ -30,10 +22,11 @@ export default async function HomePage() {
     return (
       <div className="space-y-6">
         <section className="card">
-          <h1 className="text-3xl font-semibold mb-2">Личен AI коуч</h1>
+          <h1 className="page-title mb-2">Личен AI коуч</h1>
           <p className="muted mb-4">
-            За навици, вярвания и идентичност. Помни всичко, говори с теб в Telegram
-            и тук в браузъра, дърпа те към човека, който искаш да станеш.
+            За навици, вярвания и идентичност. Помни какво е важно за теб, говори с теб в
+            браузъра и ти пише с напомняния на телефона или компютъра — като приложение, без
+            да инсталираш нищо от магазин.
           </p>
           <div className="flex gap-2">
             <Link href="/register" className="btn">
@@ -50,7 +43,9 @@ export default async function HomePage() {
 
   await requireSession();
   const data = await getDashboardData(session.userId);
-  const { profile, habits, reminders, sessions, insights, stats, user } = data;
+  const { profile, habits, reminders, sessions, insights, stats, user, deviceCount, todayStatus } =
+    data;
+  const next = nextOccurrence(reminders, user?.timezone || "Europe/Sofia");
   const onboardingDone = user?.onboardingStage === "done";
 
   const buildHabits = habits.filter((h) => h.kind !== "limiting");
@@ -151,7 +146,7 @@ export default async function HomePage() {
     <div className="space-y-6">
       <section className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold">
+          <h1 className="page-title">
             Здравей{session.name ? `, ${session.name}` : ""}
           </h1>
           <p className="muted text-sm">
@@ -161,13 +156,53 @@ export default async function HomePage() {
             {focus ? ` Фокус: ${focus}.` : ""}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           <Link href="/chat" className="btn">
             Започни разговор
+          </Link>
+          <Link href="/chat?short=1" className="btn btn-ghost">
+            Кратка сесия
           </Link>
           <Link href="/chat?deep=1" className="btn btn-ghost">
             Дълбока сесия
           </Link>
+        </div>
+      </section>
+
+      <section className="card-accent space-y-4" aria-labelledby="today-title">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div>
+            <h2 id="today-title" className="section-title">
+              Днес
+            </h2>
+            <p className="text-sm muted">
+              {next
+                ? `Следващо напомняне: ${whenLabel(next.daysAhead, next.time)}${
+                    next.reminder.reason ? ` — ${next.reminder.reason}` : ""
+                  }`
+                : "Няма насрочени напомняния."}
+            </p>
+          </div>
+          <Link href="/chat?checkin=1" className="btn btn-sm">
+            Вечерен check-in
+          </Link>
+        </div>
+
+        {deviceCount === 0 && (
+          <div className="notice text-sm flex items-center justify-between gap-3 flex-wrap">
+            <span>Включи известията, за да получаваш напомняния на това устройство.</span>
+            <Link href="/settings" className="btn btn-sm">
+              Включи
+            </Link>
+          </div>
+        )}
+
+        <div>
+          <h3 className="muted text-xs uppercase tracking-wide mb-2">Навици днес</h3>
+          <HabitCheckins
+            habits={buildHabits.slice(0, 8).map((h) => ({ id: h.id, name: h.name }))}
+            initial={todayStatus}
+          />
         </div>
       </section>
 
@@ -184,7 +219,12 @@ export default async function HomePage() {
 
       <section className="grid md:grid-cols-2 gap-4">
         <div className="card">
-          <h2 className="font-semibold mb-2">Напомняния</h2>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="font-semibold">Напомняния</h2>
+            <Link href="/settings#reminders" className="btn btn-ghost btn-sm">
+              Управлявай
+            </Link>
+          </div>
           {reminders.length ? (
             <ul className="space-y-2 text-sm">
               {reminders.map((r) => (

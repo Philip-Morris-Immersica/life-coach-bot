@@ -1,4 +1,5 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, gte, isNull, sql } from "drizzle-orm";
+import { randomInt } from "node:crypto";
 import {
   db,
   usersTable,
@@ -8,10 +9,13 @@ import {
   messagesTable,
   remindersTable,
   insightsTable,
+  checkInsTable,
   type User,
   type Session,
   type Reminder,
+  type CheckIn,
 } from "./db/index";
+import { isValidTimezone } from "./notifications/time";
 import type { ChatMsg } from "./openai";
 
 // Гарантира, че за даден потребител има ред в lc_profiles (празен е ОК).
@@ -125,6 +129,19 @@ export async function linkTelegramToWebUser(
       .update(insightsTable)
       .set({ userId: webUserId })
       .where(eq(insightsTable.userId, fromId));
+    // Сесии, напомняния и check-in-и също минават към уеб профила.
+    await db
+      .update(sessionsTable)
+      .set({ userId: webUserId })
+      .where(eq(sessionsTable.userId, fromId));
+    await db
+      .update(remindersTable)
+      .set({ userId: webUserId })
+      .where(eq(remindersTable.userId, fromId));
+    await db
+      .update(checkInsTable)
+      .set({ userId: webUserId })
+      .where(eq(checkInsTable.userId, fromId));
     // Профилът — ако уеб потребителят е празен, копираме от Telegram-only.
     const tgProfile = await db
       .select()
@@ -262,7 +279,7 @@ export async function sessionMessages(
 
 export async function createSession(
   userId: number,
-  type: "onboarding" | "deep",
+  type: "onboarding" | "short" | "deep",
   focus = ""
 ): Promise<Session> {
   const rows = await db
@@ -274,7 +291,7 @@ export async function createSession(
 
 export async function getActiveSession(
   userId: number,
-  type?: "onboarding" | "deep"
+  type?: "onboarding" | "short" | "deep"
 ): Promise<Session | undefined> {
   const conds = [
     eq(sessionsTable.userId, userId),
@@ -340,18 +357,37 @@ export async function listReminders(
     .orderBy(remindersTable.time);
 }
 
+export type ReminderInput = {
+  id?: string;
+  time: string;
+  days?: string;
+  reason?: string;
+  promptHint?: string;
+  message?: string;
+  target?: string;
+  active?: boolean;
+};
+
+export async function getReminder(
+  userId: number,
+  id: string
+): Promise<Reminder | undefined> {
+  if (!UUID_RE.test(id)) return undefined;
+  const rows = await db
+    .select()
+    .from(remindersTable)
+    .where(and(eq(remindersTable.id, id), eq(remindersTable.userId, userId)))
+    .limit(1);
+  return rows[0];
+}
+
+// Създава или обновява напомняне. Всички достъпи са ограничени до userId
+// (ownership). След запис викащият трябва да извика syncUserReminders/syncReminder.
 export async function upsertReminder(
   userId: number,
-  data: {
-    id?: string;
-    time: string;
-    days?: string;
-    reason?: string;
-    promptHint?: string;
-    active?: boolean;
-  }
+  data: ReminderInput
 ): Promise<Reminder> {
-  if (data.id) {
+  if (data.id && UUID_RE.test(data.id)) {
     const rows = await db
       .update(remindersTable)
       .set({
@@ -361,6 +397,8 @@ export async function upsertReminder(
         ...(data.promptHint !== undefined
           ? { promptHint: data.promptHint }
           : {}),
+        ...(data.message !== undefined ? { message: data.message } : {}),
+        ...(data.target !== undefined ? { target: data.target } : {}),
         ...(data.active !== undefined ? { active: data.active } : {}),
       })
       .where(
@@ -377,16 +415,25 @@ export async function upsertReminder(
       days: data.days ?? "*",
       reason: data.reason ?? "",
       promptHint: data.promptHint ?? "",
+      message: data.message ?? "",
+      target: data.target ?? "chat",
       active: data.active ?? true,
     })
     .returning();
   return rows[0];
 }
 
-export async function removeReminder(userId: number, id: string) {
-  await db
+// Връща изтрития ред (за да може викащият да махне външния график).
+export async function removeReminder(
+  userId: number,
+  id: string
+): Promise<Reminder | undefined> {
+  if (!UUID_RE.test(id)) return undefined;
+  const rows = await db
     .delete(remindersTable)
-    .where(and(eq(remindersTable.id, id), eq(remindersTable.userId, userId)));
+    .where(and(eq(remindersTable.id, id), eq(remindersTable.userId, userId)))
+    .returning();
+  return rows[0];
 }
 
 export async function markReminderSent(id: string, dateStr: string) {
@@ -418,6 +465,9 @@ export async function allActiveReminders(): Promise<
 }
 
 export async function setUserTimezone(userId: number, timezone: string) {
+  if (!isValidTimezone(timezone)) {
+    throw new Error(`Невалидна часова зона: ${timezone}`);
+  }
   await db
     .update(usersTable)
     .set({ timezone })
@@ -572,6 +622,14 @@ export async function addInsight(userId: number, content: string) {
   await db.insert(insightsTable).values({ userId, content });
 }
 
+export type ExtractedHabit = {
+  name: string;
+  kind?: string;
+  trigger?: string;
+  identityLink?: string;
+  cadence?: string;
+};
+
 export type ExtractedProfile = {
   identityCurrent?: string;
   identityTarget?: string;
@@ -580,35 +638,44 @@ export type ExtractedProfile = {
   story?: string;
   problems?: string;
   goals?: string;
-  habits?: { name: string; identityLink?: string; cadence?: string }[];
+  vision?: string;
+  focus?: string;
+  habits?: ExtractedHabit[];
 };
 
+const FOCUS_VALUES = ["habits", "goals", "beliefs", "identity"];
+
+// Записва извлечения профил. Не презаписва вече събрани данни с празни
+// стойности (инструментите update_profile може да са ги попълнили по-рано),
+// и обновява съществуващите навици вместо да създава дубликати.
 export async function saveExtractedProfile(
   userId: number,
   data: ExtractedProfile
 ) {
-  await db
-    .update(profilesTable)
-    .set({
-      identityCurrent: data.identityCurrent ?? "",
-      identityTarget: data.identityTarget ?? "",
-      beliefsLimiting: data.beliefsLimiting ?? "",
-      beliefsNew: data.beliefsNew ?? "",
-      story: data.story ?? "",
-      problems: data.problems ?? "",
-      goals: data.goals ?? "",
-      updatedAt: new Date(),
-    })
-    .where(eq(profilesTable.userId, userId));
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const focus = str(data.focus);
+  await updateProfileFields(userId, {
+    identityCurrent: str(data.identityCurrent),
+    identityTarget: str(data.identityTarget),
+    beliefsLimiting: str(data.beliefsLimiting),
+    beliefsNew: str(data.beliefsNew),
+    story: str(data.story),
+    problems: str(data.problems),
+    goals: str(data.goals),
+    vision: str(data.vision),
+    focus: FOCUS_VALUES.includes(focus) ? focus : "",
+  });
 
-  if (data.habits?.length) {
+  if (Array.isArray(data.habits)) {
     for (const h of data.habits) {
-      if (!h.name) continue;
-      await db.insert(habitsTable).values({
-        userId,
-        name: h.name,
-        identityLink: h.identityLink ?? "",
-        cadence: h.cadence ?? "всеки ден",
+      const name = str(h?.name);
+      if (!name) continue;
+      await upsertHabit(userId, {
+        name: name.slice(0, 300),
+        kind: h.kind === "limiting" ? "limiting" : "build",
+        trigger: str(h.trigger) || undefined,
+        identityLink: str(h.identityLink) || undefined,
+        cadence: str(h.cadence) || undefined,
       });
     }
   }
@@ -626,7 +693,7 @@ function randomCode(len = 8): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // без объркващи знаци
   let out = "";
   for (let i = 0; i < len; i++) {
-    out += alphabet[Math.floor(Math.random() * alphabet.length)];
+    out += alphabet[randomInt(alphabet.length)];
   }
   return out;
 }
@@ -662,4 +729,72 @@ export async function consumeLinkCode(
     .set({ usedAt: new Date() })
     .where(eq(linkCodesTable.code, trimmed));
   return row.userId;
+}
+
+// ---- Check-in-и (accountability) ----
+
+export type CheckInStatus = "done" | "partial" | "missed";
+
+export function isCheckInStatus(v: unknown): v is CheckInStatus {
+  return v === "done" || v === "partial" || v === "missed";
+}
+
+// Намира активен навик по id или (частично) име.
+export async function findHabit(userId: number, idOrName: string) {
+  const habits = await getHabits(userId);
+  if (UUID_RE.test(idOrName)) {
+    const byId = habits.find((h) => h.id === idOrName);
+    if (byId) return byId;
+  }
+  const q = idOrName.trim().toLowerCase();
+  if (!q) return undefined;
+  return (
+    habits.find((h) => h.name.toLowerCase() === q) ??
+    habits.find((h) => h.name.toLowerCase().includes(q))
+  );
+}
+
+export async function logCheckIn(
+  userId: number,
+  data: { habitId?: string | null; status: CheckInStatus; note?: string }
+): Promise<CheckIn> {
+  const rows = await db
+    .insert(checkInsTable)
+    .values({
+      userId,
+      habitId: data.habitId ?? null,
+      status: data.status,
+      note: data.note?.trim().slice(0, 500) || null,
+    })
+    .returning();
+  return rows[0];
+}
+
+export async function getCheckInsSince(
+  userId: number,
+  since: Date
+): Promise<CheckIn[]> {
+  return db
+    .select()
+    .from(checkInsTable)
+    .where(and(eq(checkInsTable.userId, userId), gte(checkInsTable.createdAt, since)))
+    .orderBy(desc(checkInsTable.createdAt));
+}
+
+// ---- Лимит на разхода ----
+
+// Брой съобщения на потребителя от последните 24 часа (за дневен лимит).
+export async function userMessagesLast24h(userId: number): Promise<number> {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const rows = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(messagesTable)
+    .where(
+      and(
+        eq(messagesTable.userId, userId),
+        eq(messagesTable.role, "user"),
+        gte(messagesTable.createdAt, since)
+      )
+    );
+  return rows[0]?.n ?? 0;
 }

@@ -9,6 +9,8 @@ import {
   ONBOARDING,
   ORIENTATION,
   DEEP_SESSION,
+  SHORT_SESSION,
+  CHECKIN,
   DAILY_CHAT,
   EXTRACT_PROFILE,
   BASE_COACH,
@@ -23,6 +25,8 @@ export type Settings = {
     orientation: string;
     onboarding: string;
     deepSession: string;
+    shortSession: string;
+    checkin: string;
     dailyChat: string;
     extractProfile: string;
     morning: string;
@@ -53,6 +57,8 @@ export const DEFAULT_SETTINGS: Settings = {
     orientation: ORIENTATION,
     onboarding: ONBOARDING,
     deepSession: DEEP_SESSION,
+    shortSession: SHORT_SESSION,
+    checkin: CHECKIN,
     dailyChat: DAILY_CHAT,
     extractProfile: EXTRACT_PROFILE,
     morning: morningPrompt(),

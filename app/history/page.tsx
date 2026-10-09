@@ -40,7 +40,8 @@ function groupByDay(rows: Row[]): Group[] {
 }
 
 function sessionTypeLabel(type: string): string {
-  return type === "onboarding" ? "опознаване" : "дълбока сесия";
+  if (type === "onboarding") return "опознаване";
+  return type === "short" ? "кратка сесия" : "дълбока сесия";
 }
 
 export default async function HistoryPage() {
@@ -69,7 +70,7 @@ export default async function HistoryPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-semibold">История</h1>
+      <h1 className="page-title">История</h1>
 
       <section className="space-y-3">
         <h2 className="font-semibold">Сесии</h2>
@@ -129,7 +130,9 @@ export default async function HistoryPage() {
           <div key={g.dayKey} className="card">
             <h3 className="font-medium mb-3 capitalize">{g.dayLabel}</h3>
             <ul className="space-y-2 text-sm">
-              {g.items.map((m) => (
+              {g.items
+                .filter((m) => !m.content.startsWith("[Потребителят започна"))
+                .map((m) => (
                 <li
                   key={m.id}
                   className={
@@ -137,12 +140,7 @@ export default async function HistoryPage() {
                   }
                 >
                   <div
-                    className={`max-w-[80%] rounded-xl px-3 py-2 whitespace-pre-wrap ${m.role === "user" ? "bg-green-700/30" : "border"}`}
-                    style={
-                      m.role === "user"
-                        ? undefined
-                        : { borderColor: "var(--border)" }
-                    }
+                    className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 whitespace-pre-wrap ${m.role === "user" ? "bubble-user" : "bubble-ai"}`}
                   >
                     <div className="muted text-xs mb-1">
                       {kindLabel(m.kind)} ·{" "}
@@ -167,6 +165,8 @@ function kindLabel(kind: string): string {
   switch (kind) {
     case "deep":
       return "дълбока сесия";
+    case "short":
+      return "кратка сесия";
     case "onboarding":
       return "опознаване";
     case "checkin":

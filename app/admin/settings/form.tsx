@@ -80,15 +80,20 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
           onChange={(v) => update("prompts", { extractProfile: v })}
         />
         <PromptField
-          label="Сутрешно напомняне"
-          value={s.prompts.morning}
-          onChange={(v) => update("prompts", { morning: v })}
+          label="Кратка сесия (5-10 минути)"
+          value={s.prompts.shortSession}
+          onChange={(v) => update("prompts", { shortSession: v })}
         />
         <PromptField
-          label="Вечерно напомняне"
-          value={s.prompts.evening}
-          onChange={(v) => update("prompts", { evening: v })}
+          label="Check-in (отчитане на навици)"
+          value={s.prompts.checkin}
+          onChange={(v) => update("prompts", { checkin: v })}
         />
+        <p className="muted text-xs">
+          Блокът за безопасност (граници, насочване към 112 и специалист) се добавя автоматично
+          най-отпред във всички промпти и не се редактира оттук. Текстът на известията е шаблон,
+          не промпт.
+        </p>
       </Section>
 
       <Section title="Модели">
@@ -240,7 +245,7 @@ export default function SettingsForm({ initial }: { initial: Settings }) {
       {msg && (
         <p
           className={
-            msg.kind === "err" ? "text-red-400 text-sm" : "text-green-400 text-sm"
+            msg.kind === "err" ? "text-error text-sm" : "text-success text-sm"
           }
         >
           {msg.text}

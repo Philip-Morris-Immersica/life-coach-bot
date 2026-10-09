@@ -63,7 +63,7 @@ export default function AdminsForm() {
       {msg && (
         <p
           className={
-            msg.kind === "err" ? "text-red-400 text-sm" : "text-green-400 text-sm"
+            msg.kind === "err" ? "text-error text-sm" : "text-success text-sm"
           }
         >
           {msg.text}

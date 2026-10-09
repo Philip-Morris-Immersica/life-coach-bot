@@ -6,6 +6,7 @@ import { complete, computeCost, runConversation, type Turn } from "../llm";
 import type { ChatMsg } from "../openai";
 import { buildContext } from "../prompts";
 import { getSettings } from "./settings";
+import { assessRisk, crisisReply, withSafety } from "./safety";
 import {
   COACH_TOOLS,
   makeToolExecutor,
@@ -16,9 +17,11 @@ import {
   completeSession,
   createSession,
   getActiveSession,
+  getCheckInsSince,
   getHabits,
   getInsights,
   getProfile,
+  getUserById,
   listReminders,
   recentMessages,
   saveExtractedProfile,
@@ -29,10 +32,16 @@ import {
   upsertReminder,
   type ExtractedProfile,
 } from "../memory";
+import { defaultBody } from "../notifications/content";
+import { syncUserReminders } from "../notifications/sync";
+import { localParts } from "../notifications/time";
+
+export type CoachStage = "orientation" | "onboarding" | "deep" | "short" | "chat";
+export type SessionKind = "deep" | "short";
 
 export type CoachReply = {
   text: string;
-  stage: "orientation" | "onboarding" | "deep" | "chat";
+  stage: CoachStage;
   sessionId?: string | null;
   // Динамични опции (бутони/чипове) — само при ориентация/предлагане на посока.
   options?: CoachUiActions["options"];
@@ -49,7 +58,17 @@ function toTurns(history: ChatMsg[]): Turn[] {
   );
 }
 
+function parseJson<T>(raw: string): T {
+  const cleaned = raw
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+  return JSON.parse(cleaned) as T;
+}
+
 // Построява системния промпт + контекстен блок от паметта.
+// Неизменяемият блок за безопасност винаги е най-отпред.
 async function buildSystemForUser(userId: number, base: string): Promise<string> {
   const [profile, habits, insights, reminders] = await Promise.all([
     getProfile(userId),
@@ -58,7 +77,7 @@ async function buildSystemForUser(userId: number, base: string): Promise<string>
     listReminders(userId),
   ]);
   const ctx = buildContext(profile, habits, insights, reminders);
-  return ctx ? `${base}\n\n${ctx}` : base;
+  return withSafety(ctx ? `${base}\n\n${ctx}` : base);
 }
 
 // Сърцето: пуска разговора с инструменти, записва отговора с телеметрия,
@@ -98,6 +117,10 @@ async function generateWithTools(opts: {
   return { text, ui };
 }
 
+function sessionKindForMode(mode: string): SessionKind | null {
+  return mode === "deep" || mode === "short" ? mode : null;
+}
+
 // ---- Публични операции ----
 
 // Първи контакт: ориентация (роля + ползи + опции), не разпит.
@@ -107,7 +130,7 @@ export async function startOrientation(userId: number): Promise<CoachReply> {
   await setMode(userId, "idle");
   const { text, ui } = await generateWithTools({
     userId,
-    system: settings.prompts.orientation,
+    system: withSafety(settings.prompts.orientation),
     history: [],
     modelId: settings.models.deep,
     temperature: settings.temperatures.deep,
@@ -152,11 +175,84 @@ export async function startDeep(
   };
 }
 
-// Прекратява дълбоката сесия: извлича прозрение, заглавие и резюме.
-export async function endDeep(userId: number): Promise<CoachReply> {
+// Започва кратка сесия (5-10 минути, една тема, една стъпка). Ползва бързия модел.
+export async function startShort(
+  userId: number,
+  topic = ""
+): Promise<CoachReply> {
+  const settings = await getSettings();
+  await setMode(userId, "short");
+  const session = await createSession(userId, "short", topic);
+  await saveMessage(
+    userId,
+    "user",
+    topic
+      ? `[Потребителят започна кратка сесия по тема: ${topic}]`
+      : "[Потребителят започна кратка сесия]",
+    "short",
+    { sessionId: session.id }
+  );
+  const system = await buildSystemForUser(userId, settings.prompts.shortSession);
+  const { text, ui } = await generateWithTools({
+    userId,
+    system,
+    history: await sessionMessages(session.id),
+    modelId: settings.models.fast,
+    temperature: settings.temperatures.fast,
+    kind: "short",
+    sessionId: session.id,
+  });
+  return {
+    text,
+    stage: "short",
+    sessionId: session.id,
+    options: ui.options,
+    offer: ui.offer,
+  };
+}
+
+// Кратък check-in за навиците (по инициатива на човека или от известие).
+export async function startCheckin(userId: number): Promise<CoachReply> {
+  const settings = await getSettings();
+  const [user, habits] = await Promise.all([getUserById(userId), getHabits(userId)]);
+  const tz = user?.timezone || "Europe/Sofia";
+  const today = localParts(tz).date;
+  const recent = await getCheckInsSince(userId, new Date(Date.now() - 36 * 60 * 60 * 1000));
+  const reported = recent
+    .filter((c) => localParts(tz, new Date(c.createdAt)).date === today)
+    .map((c) => {
+      const name = habits.find((h) => h.id === c.habitId)?.name ?? "общо";
+      return `${name}: ${c.status}`;
+    });
+
+  await saveMessage(userId, "user", "[Потребителят започна check-in]", "chat", {
+    sessionId: null,
+  });
+  let system = await buildSystemForUser(userId, settings.prompts.checkin);
+  if (reported.length) {
+    system += `\n\nВЕЧЕ ОТЧЕТЕНО ДНЕС (не питай пак): ${reported.join("; ")}.`;
+  }
+  const { text, ui } = await generateWithTools({
+    userId,
+    system,
+    history: await recentMessages(userId, 6),
+    modelId: settings.models.fast,
+    temperature: settings.temperatures.checkin,
+    kind: "chat",
+    sessionId: null,
+  });
+  return { text, stage: "chat", options: ui.options, offer: ui.offer };
+}
+
+// Прекратява сесия (дълбока или кратка): извлича прозрение, заглавие и резюме.
+export async function endSession(
+  userId: number,
+  kind: SessionKind
+): Promise<CoachReply> {
   const settings = await getSettings();
   await setMode(userId, "idle");
-  const session = await getActiveSession(userId, "deep");
+  const defaultTitle = kind === "short" ? "Кратка сесия" : "Дълбока сесия";
+  const session = await getActiveSession(userId, kind);
   const history = session
     ? await sessionMessages(session.id, 60)
     : await recentMessages(userId, 30);
@@ -174,20 +270,15 @@ export async function endDeep(userId: number): Promise<CoachReply> {
       user: transcript,
       temperature: 0.3,
     });
-    const cleaned = raw
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```\s*$/i, "")
-      .trim();
-    const data = JSON.parse(cleaned) as {
+    const data = parseJson<{
       title?: string;
       summary?: string;
       insight?: string;
       focus?: string;
-    };
+    }>(raw);
     if (session) {
       await completeSession(session.id, {
-        title: data.title || "Дълбока сесия",
+        title: data.title || defaultTitle,
         summary: data.summary || "",
         focus: data.focus || "",
       });
@@ -200,9 +291,14 @@ export async function endDeep(userId: number): Promise<CoachReply> {
       stage: "chat",
     };
   } catch {
-    if (session) await completeSession(session.id, { title: "Дълбока сесия" });
+    if (session) await completeSession(session.id, { title: defaultTitle });
     return { text: "Сесията приключи. Връщам се в нормален режим.", stage: "chat" };
   }
+}
+
+// Съвместимост със съществуващите извиквания.
+export function endDeep(userId: number): Promise<CoachReply> {
+  return endSession(userId, "deep");
 }
 
 // Финализира опознаването: извлича структуриран профил, поставя цели и
@@ -220,12 +316,7 @@ export async function finalizeOnboarding(userId: number): Promise<CoachReply> {
       user: transcript,
       temperature: 0.2,
     });
-    const cleaned = raw
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```\s*$/i, "")
-      .trim();
-    data = JSON.parse(cleaned);
+    data = parseJson<ExtractedProfile>(raw);
   } catch {
     return {
       text: "Не успях да структурирам напълно. Нека довършим разговора още малко и пробвай отново.",
@@ -240,14 +331,14 @@ export async function finalizeOnboarding(userId: number): Promise<CoachReply> {
 
   const lines: string[] = ["Ето какво разбрах и целите, които поставяме заедно:\n"];
   if (data.identityTarget) lines.push(`Нова идентичност: ${data.identityTarget}`);
-  if ((data as any).vision) lines.push(`Визия: ${(data as any).vision}`);
+  if (data.vision) lines.push(`Визия: ${data.vision}`);
   if (data.beliefsNew) lines.push(`Нови вярвания: ${data.beliefsNew}`);
   if (data.goals) lines.push(`Цели: ${data.goals}`);
   if (data.habits?.length) {
     lines.push(
       "\nНавици, които градим:\n" +
         data.habits
-          .filter((h) => (h as any).kind !== "limiting")
+          .filter((h) => h.kind !== "limiting")
           .map(
             (h, i) =>
               `${i + 1}. ${h.name}${h.identityLink ? ` -> ${h.identityLink}` : ""}`
@@ -256,7 +347,7 @@ export async function finalizeOnboarding(userId: number): Promise<CoachReply> {
     );
   }
   lines.push(
-    "\nОт сега ще ти пиша по уговорения ритъм. Когато усетиш съпротива или искаш да разнищим нещо — кажи и започваме дълбока сесия. Да започваме."
+    "\nНапомнянията са в Настройки — можеш да промениш часовете и да включиш известията на телефона си. Когато усетиш съпротива или искаш да разнищим нещо — кажи и започваме кратка или дълбока сесия. Да започваме."
   );
   return { text: lines.join("\n"), stage: "chat" };
 }
@@ -268,13 +359,31 @@ export async function handleUserMessage(
   user: { onboardingStage: string; mode: string }
 ): Promise<CoachReply> {
   const settings = await getSettings();
+  const sessionKind = sessionKindForMode(user.mode);
+  const inOnboarding = !sessionKind && user.onboardingStage !== "done";
 
-  // Тече дълбока сесия.
-  if (user.mode === "deep") {
-    const session = await getActiveSession(userId, "deep");
-    const sessionId = session?.id ?? null;
-    await saveMessage(userId, "user", text, "deep", { sessionId });
-    const system = await buildSystemForUser(userId, settings.prompts.deepSession);
+  // Сесия (дълбока/кратка) е активна.
+  const session = sessionKind ? await getActiveSession(userId, sessionKind) : undefined;
+  const sessionId = session?.id ?? null;
+  const kind = sessionKind ?? (inOnboarding ? "onboarding" : "chat");
+  const stage: CoachStage = sessionKind ?? (inOnboarding ? "onboarding" : "chat");
+
+  await saveMessage(userId, "user", text, kind, { sessionId });
+
+  // Кризисни сигнали се обработват детерминирано, без да се вика моделът.
+  const risk = assessRisk(text);
+  if (risk.level === "crisis") {
+    const reply = crisisReply(risk.reason);
+    await saveMessage(userId, "assistant", reply, kind, { sessionId, model: "safety" });
+    return { text: reply, stage, sessionId };
+  }
+
+  if (sessionKind) {
+    const deep = sessionKind === "deep";
+    const system = await buildSystemForUser(
+      userId,
+      deep ? settings.prompts.deepSession : settings.prompts.shortSession
+    );
     const history = sessionId
       ? await sessionMessages(sessionId)
       : await recentMessages(userId);
@@ -282,77 +391,51 @@ export async function handleUserMessage(
       userId,
       system,
       history,
-      modelId: settings.models.deep,
-      temperature: settings.temperatures.deep,
-      kind: "deep",
+      modelId: deep ? settings.models.deep : settings.models.fast,
+      temperature: deep ? settings.temperatures.deep : settings.temperatures.fast,
+      kind,
       sessionId,
     });
-    return {
-      text: reply,
-      stage: "deep",
-      sessionId,
-      options: ui.options,
-      offer: ui.offer,
-    };
+    return { text: reply, stage, sessionId, options: ui.options, offer: ui.offer };
   }
 
   // Нормален поток (ежедневен чат). Преди 'done' ползваме прогресивно опознаване.
-  const inOnboarding = user.onboardingStage !== "done";
-  const kind = inOnboarding ? "onboarding" : "chat";
-  await saveMessage(userId, "user", text, kind, { sessionId: null });
-  const base = inOnboarding
-    ? settings.prompts.onboarding
-    : settings.prompts.dailyChat;
+  const base = inOnboarding ? settings.prompts.onboarding : settings.prompts.dailyChat;
   const system = await buildSystemForUser(userId, base);
   const { text: reply, ui } = await generateWithTools({
     userId,
     system,
     history: await recentMessages(userId),
     modelId: inOnboarding ? settings.models.deep : settings.models.fast,
-    temperature: inOnboarding
-      ? settings.temperatures.deep
-      : settings.temperatures.fast,
+    temperature: inOnboarding ? settings.temperatures.deep : settings.temperatures.fast,
     kind,
     sessionId: null,
   });
-  return {
-    text: reply,
-    stage: inOnboarding ? "onboarding" : "chat",
-    options: ui.options,
-    offer: ui.offer,
-  };
+  return { text: reply, stage, options: ui.options, offer: ui.offer };
 }
 
-// Генерира текст за персонално напомняне (без вход от потребителя).
-export async function generateReminderMessage(
-  userId: number,
-  reminder: { reason?: string; promptHint?: string }
-): Promise<{ text: string; model: string; promptTokens: number; completionTokens: number; costUsd: number }> {
-  const settings = await getSettings();
-  const [system, history] = await Promise.all([
-    buildSystemForUser(userId, settings.prompts.morning),
-    recentMessages(userId, 6),
-  ]);
-  const hint =
-    `\n\nТова е автоматично напомняне` +
-    (reminder.reason ? ` за: ${reminder.reason}.` : ".") +
-    (reminder.promptHint ? ` Насока: ${reminder.promptHint}` : "") +
-    `\nНапиши кратко (2-3 изречения), топло, по темата. Завърши с един въпрос.`;
-  const turns: Turn[] = toTurns(history);
-  const res = await runConversation({
-    model: settings.models.fast,
-    system: system + hint,
-    history: turns.length ? turns : [{ role: "user", text: "(ново напомняне)" }],
-    temperature: settings.temperatures.checkin,
-    maxRounds: 1,
-  });
-  return {
-    text: res.text,
-    model: res.model,
-    promptTokens: res.usage.promptTokens,
-    completionTokens: res.usage.completionTokens,
-    costUsd: computeCost(res.model, res.usage.promptTokens, res.usage.completionTokens),
-  };
+// Предлага текст за известие (чернова за уеб формата). Не ползва памет на потребителя
+// и бързия модел — евтино и без чувствителни данни. При грешка връща шаблона.
+export async function draftReminderMessage(
+  time: string,
+  reason: string
+): Promise<string> {
+  const fallback = defaultBody(reason, time);
+  try {
+    const settings = await getSettings();
+    const { text } = await complete({
+      model: settings.models.fast,
+      system:
+        "Напиши текст за push известие на български, на 'ти'. До 140 знака, топло и конкретно, " +
+        "без емоджита, без кавички, без въпросителни повече от един. Върни САМО текста на известието.",
+      user: `Час: ${time}. Тема: ${reason.trim() || "общо напомняне от коуча"}.`,
+      temperature: 0.8,
+    });
+    const clean = text.replace(/^["„“\s]+|["“”\s]+$/g, "").replace(/\s+/g, " ").trim();
+    return clean ? clean.slice(0, 240) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 // Seed на разумни базови напомняния, ако потребителят още няма.
@@ -369,7 +452,10 @@ async function seedDefaultReminders(userId: number) {
     time: "21:00",
     days: "*",
     reason: "вечерен преглед",
+    target: "checkin",
     promptHint:
       "Как мина денят спрямо навиците, за какво е благодарен, какво да подобри утре.",
   });
+  // Графиците се създават само ако вече има регистрирано устройство.
+  await syncUserReminders(userId);
 }

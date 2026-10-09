@@ -130,6 +130,46 @@ const statements = [
     data jsonb NOT NULL,
     updated_at timestamp NOT NULL DEFAULT now()
   )`,
+
+  // --- Web Push известия ---
+  `ALTER TABLE lc_users ADD COLUMN IF NOT EXISTS notifications_paused boolean NOT NULL DEFAULT false`,
+  `ALTER TABLE lc_users ADD COLUMN IF NOT EXISTS quiet_hours_start varchar(5) NOT NULL DEFAULT ''`,
+  `ALTER TABLE lc_users ADD COLUMN IF NOT EXISTS quiet_hours_end varchar(5) NOT NULL DEFAULT ''`,
+  `ALTER TABLE lc_users ADD COLUMN IF NOT EXISTS privacy_mode boolean NOT NULL DEFAULT false`,
+
+  `ALTER TABLE lc_reminders ADD COLUMN IF NOT EXISTS message text NOT NULL DEFAULT ''`,
+  `ALTER TABLE lc_reminders ADD COLUMN IF NOT EXISTS target varchar(20) NOT NULL DEFAULT 'chat'`,
+  `ALTER TABLE lc_reminders ADD COLUMN IF NOT EXISTS schedule_id varchar(100) NOT NULL DEFAULT ''`,
+  `ALTER TABLE lc_reminders ADD COLUMN IF NOT EXISTS sync_status varchar(20) NOT NULL DEFAULT 'idle'`,
+  `ALTER TABLE lc_reminders ADD COLUMN IF NOT EXISTS sync_error text NOT NULL DEFAULT ''`,
+
+  `CREATE TABLE IF NOT EXISTS lc_push_subscriptions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id integer NOT NULL REFERENCES lc_users(id) ON DELETE CASCADE,
+    endpoint text NOT NULL UNIQUE,
+    p256dh text NOT NULL,
+    auth text NOT NULL,
+    label varchar(120) NOT NULL DEFAULT '',
+    active boolean NOT NULL DEFAULT true,
+    failure_count integer NOT NULL DEFAULT 0,
+    last_success_at timestamp,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  `CREATE INDEX IF NOT EXISTS lc_push_subscriptions_user_idx ON lc_push_subscriptions (user_id)`,
+
+  `CREATE TABLE IF NOT EXISTS lc_notification_deliveries (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id integer NOT NULL REFERENCES lc_users(id) ON DELETE CASCADE,
+    reminder_id uuid,
+    dedupe_key varchar(120) NOT NULL UNIQUE,
+    status varchar(20) NOT NULL DEFAULT 'claimed',
+    detail text NOT NULL DEFAULT '',
+    sent_count integer NOT NULL DEFAULT 0,
+    created_at timestamp NOT NULL DEFAULT now()
+  )`,
+  // Полезни индекси за ownership/лимити.
+  `CREATE INDEX IF NOT EXISTS lc_messages_user_created_idx ON lc_messages (user_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS lc_reminders_user_idx ON lc_reminders (user_id)`,
 ];
 
 async function main() {

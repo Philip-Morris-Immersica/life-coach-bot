@@ -23,6 +23,16 @@ export {
   insightsTable,
   linkCodesTable,
   settingsTable,
+  pushSubscriptionsTable,
+  notificationDeliveriesTable,
 } from "./schema";
 
-export type { User, Profile, Habit, Session, Reminder } from "./schema";
+export type {
+  User,
+  Profile,
+  Habit,
+  Session,
+  Reminder,
+  PushSubscriptionRow,
+  CheckIn,
+} from "./schema";

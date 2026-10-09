@@ -1,162 +1,148 @@
 # Life Coach
 
-Личен AI коуч за **навици, вярвания и идентичност**. Две лица, една памет:
-- **Telegram бот** — проактивни сутрешни/вечерни check-in-и, дълбоки сесии, всекидневен разговор.
-- **Уеб приложение** — табло (цели, навици, прогрес), чат сесии в браузъра, история, и **админ панел** за редактиране на промпти, модели и настройки на бота.
+Личен AI коуч за **навици, вярвания и идентичност**.
 
-Стек: **Node + TypeScript + Telegraf + OpenAI + Neon (Drizzle ORM) + Next.js (App Router) + Tailwind v4**.
+- **Сайт / PWA** (Next.js) — табло, чат, кратки и дълбоки сесии, история, check-in-и, настройки на напомняния. Инсталира се на телефон и компютър директно от браузъра.
+- **Web Push напомняния** — идват и когато браузърът е затворен; един клик отваря нужния екран.
+- **Telegram бот (по избор)** — отделен процес; не е нужен за напомнянията.
 
----
-
-## Какво прави
-
-- **Опознавателна сесия** при първо влизане — естествено интервю за идентичност, вярвания, история, навици и проблеми. Накрая автоматично структурира всичко в профил и поставя цели.
-- **Всекидневен режим** — кратки, подкрепящи отговори; при по-дълбок проблем предлага дълбока сесия.
-- **Дълбоки сесии** — Сократов диалог; в края извлича едно ключово прозрение и го пази.
-- **Проактивни напомняния** — сутрешен фокус и вечерна рефлексия (cron в часовата зона на сървъра).
-- **Обща памет** — профил, навици, история и прозрения, едни и същи в Telegram и в уеб.
-- **Админ панел** — редактирай промптовете, моделите, температурите и часовете на напомнянията на живо. Промените важат веднага (10s кеш).
-
-## Памет (таблици)
-
-Всички с префикс `lc_` (за да съжителства спокойно с други проекти в същата Neon база):
-`lc_users`, `lc_profiles`, `lc_habits`, `lc_check_ins`, `lc_messages`, `lc_insights`, `lc_link_codes`, `lc_settings`.
+Стек: Next.js (App Router) + Tailwind v4 + Neon Postgres (Drizzle) + OpenAI/Anthropic + Web Push (VAPID) + Upstash QStash.
 
 ---
 
-## Настройка (еднократно)
+## Архитектура
 
-### 1. Зависимости и `.env`
+```
+Телефон/компютър (PWA + service worker)
+        |  абонамент за push
+        v
+Next.js във Vercel  <---->  Neon Postgres
+        |
+        |  създава график за всяко напомняне
+        v
+     QStash  --(подписан POST в точния час)-->  /api/push/dispatch
+                                                     |
+                                                     v
+                                    Web Push -> service worker -> известие
+```
+
+- **Няма постоянен процес и няма проверка на базата на всяка минута.** QStash вика сайта само когато има реално напомняне, така че Neon може да заспива.
+- Текстът на известието е **шаблон** (без LLM разход при изпращане).
+- Един и същ (напомняне, дата) не може да се изпрати два пъти (идемпотентност в `lc_notification_deliveries`).
+- Графици се създават **само** ако потребителят има регистрирано устройство, не е на пауза и напомнянето е активно.
+
+---
+
+## Настройка
+
+### 1. Зависимости и env
 
 ```bash
 npm install
 cp .env.example .env
+npm run vapid      # генерира VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY
 ```
 
-Попълни в `.env`:
+Попълни `.env` (виж коментарите в `.env.example`). Задължителни за сайта: `DATABASE_URL`, `OPENAI_API_KEY`, `SESSION_SECRET`, `WEB_URL`. За напомняния: `VAPID_*` и `QSTASH_*`.
 
-| Променлива | За какво | Откъде |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | За Telegram бота | @BotFather → `/newbot` |
-| `OPENAI_API_KEY` | За LLM-а | OpenAI dashboard |
-| `OPENAI_MODEL_FAST` / `OPENAI_MODEL_DEEP` | Модели (по подразбиране gpt-4o-mini / gpt-4o) | по избор |
-| `DATABASE_URL` | Neon connection string | console.neon.tech (с `?sslmode=require`) |
-| `SESSION_SECRET` | Подпис на уеб сесиите (>=32 hex) | `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
-| `ADMIN_EMAILS` | Списък имейли (през запетая), които при регистрация стават админи | по избор |
-| `MORNING_HOUR` / `MORNING_MINUTE` / `EVENING_HOUR` / `EVENING_MINUTE` / `TIMEZONE` | Fallback за check-in часовете (админ панелът override-ва) | по избор |
-
-### 2. Създай таблиците
+### 2. База данни
 
 ```bash
-npm run db:init
+npm run db:init    # идемпотентно: CREATE/ALTER ... IF NOT EXISTS, само lc_ таблици
 ```
 
-Това е идемпотентно (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`) и **не пипа** други таблици в базата.
-
----
-
-## Стартиране (локално)
-
-В два терминала:
+### 3. Стартиране локално
 
 ```bash
-# Терминал 1: Telegram бот
-npm run dev     # или: npm start
-
-# Терминал 2: уеб приложение
-npm run web:dev
+npm run dev        # сайт на http://localhost:3000
 ```
 
-Уеб приложението работи на http://localhost:3000.
+Локално `localhost` не е достъпен за QStash, затова графиците ще покажат състояние „грешка: WEB_URL е локален“. За тест на известията ползвай бутона „Тестово известие“ в **Настройки**. Service worker работи на `localhost`; на телефон изисква HTTPS (Vercel).
 
 ### Първи админ
 
-1. В сайта се регистрирай с имейл от списъка `ADMIN_EMAILS`. Автоматично ставаш админ.
-2. Алтернативно: регистрирай се нормално, после в Neon Studio (`npm run db:studio`) промени `lc_users.is_admin = true` за твоя ред.
-
-### Свързване на Telegram с уеб профила
-
-1. Влез в Telegram бота, пиши `/link` — получаваш 8-знаков код.
-2. В сайта отиди на „Telegram" → въведи кода.
-3. Готово — историята, навиците и прозренията от двата канала се сливат.
+Регистрирай се с имейл от `ADMIN_EMAILS` или задай `lc_users.is_admin = true` (`npm run db:studio`).
 
 ---
 
-## Команди в Telegram бота
+## Деплой във Vercel
 
-| Команда | Действие |
-|---|---|
-| `/start` | Първо посрещане / опознавателна сесия |
-| `/deep` | Започни дълбока коучинг сесия |
-| `/end` | Приключи дълбоката сесия (запазва прозрение) |
-| `/habits` | Покажи активните навици |
-| `/checkins on\|off` | Включи/изключи проактивните напомняния |
-| `/link` | Код за свързване с уеб профила |
-| `/reset` | Започни опознаването наново |
+1. Свържи GitHub репото във Vercel (framework: Next.js; `vercel.json` е добавен).
+2. Добави environment променливите от `.env.example` (без Telegram).
+3. Задай `WEB_URL` към публичния адрес (https://…vercel.app или свой домейн).
+4. Пусни `npm run db:init` еднократно с продукционния `DATABASE_URL`.
+5. В [Upstash QStash](https://console.upstash.com/qstash) вземи `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY`.
+6. Отвори сайта → **Настройки** → „Включи известията“ → „Тестово известие“.
 
----
+**Checklist преди пускане**
+- [ ] `SESSION_SECRET` е поне 32 знака.
+- [ ] `INVITE_CODES` е зададен (invite-only), `DAILY_MESSAGE_LIMIT` е разумен.
+- [ ] OpenAI/Anthropic имат spending limit в техните dashboard-и.
+- [ ] Neon: включен scale-to-zero; няма друг процес, който държи връзка/проверява базата.
+- [ ] В Railway няма стари услуги, които още работят (виж `PROJECT_REVIEW_AND_ROADMAP_BG.md`).
+- [ ] Vercel Hobby е само за лична/некомерсиална употреба.
 
-## Структура на проекта
-
-```
-src/
-  bot.ts            Telegram handlers (тънка обвивка)
-  index.ts          entrypoint за бота (scheduler + bot.launch)
-  scheduler.ts      cron за check-in-и
-  memory.ts         CRUD върху Neon (lc_ таблици)
-  prompts.ts        Default промпти (fallback за lc_settings)
-  openai.ts         OpenAI клиент
-  core/
-    coach.ts        КОУЧИНГ ЯДРО (използва се от бота И уеб API)
-    settings.ts     Четене/запис на lc_settings с кеш
-  db/
-    index.ts, schema.ts   Drizzle
-
-app/                Next.js App Router
-  page.tsx          Табло
-  chat/             Уеб чат / сесия
-  history/          История на разговорите и прозренията
-  link-telegram/    Свързване с Telegram
-  admin/            Админ панел (потребители, настройки)
-  api/              Server route-и (auth, chat, admin)
-
-lib/                Уеб-specific помощници (auth, session, dashboard)
-scripts/init-db.ts  Идемпотентен SQL bootstrap (lc_ таблици)
-```
+### iPhone
+Web Push работи на iOS/iPadOS 16.4+ само ако сайтът е добавен на началния екран (Share → Add to Home Screen) и е отворен оттам поне веднъж.
 
 ---
 
-## Деплой на Railway
+## Telegram бот (по избор, НЕ във Vercel)
 
-Препоръчителен setup: **две услуги, едно репо**, обща Neon база.
-
-1. Качи репото в GitHub.
-2. В Railway създай **нов проект → Deploy from GitHub**.
-3. Създай **две services** в проекта (и двете сочат към същото репо):
-   - **`web`** — start command: `npm run web:start`, build command: `npm ci && npm run web:build`.
-   - **`bot`** — start command: `npm run start`, build command: `npm ci`.
-   - (Файловете `railway.web.toml` и `railway.bot.toml` са за референция; в Railway-Settings можеш да ги вмъкнеш ръчно или да настроиш командите от UI-то.)
-4. Сложи environment променливите от секцията [Настройка](#настройка-еднократно) и на **двете** services (обща Neon база, общ OpenAI ключ, общ `SESSION_SECRET`).
-5. Пусни `npm run db:init` веднъж (от локалната ти машина с продукционния `DATABASE_URL`, или като еднократен Railway job), за да създадеш таблиците.
-6. Изложи публичен URL за `web` (Settings → Networking → Generate Domain) — този домейн ще е сайтът ти.
-7. Restart на `bot` всеки път, когато промениш часовете за check-in в админ панела (cron schedule се чете при стартиране).
-
-### Защо две services?
-- Ботът използва long-polling към Telegram (постоянно работещ процес).
-- Уеб приложението сервира HTTP заявки и може да scale-ва независимо.
-- Един общ процес би смесил тези два много различни жизнени цикъла.
-
----
-
-## Полезни команди
+Ботът използва long-polling и затова е отделен постоянен процес:
 
 ```bash
-npm run dev          # бот с auto-restart
-npm start            # бот (production)
-npm run web:dev      # сайт на localhost:3000
-npm run web:build    # production build на сайта
-npm run web:start    # пускане на build-натия сайт
-
-npm run db:init      # създай/мигрирай lc_ таблици (идемпотентно)
-npm run db:studio    # Drizzle Studio за оглед на данните
+npm run bot        # production
+npm run bot:dev    # с auto-restart
 ```
+
+- Нужен е `TELEGRAM_BOT_TOKEN`. Препоръчително е `TELEGRAM_ALLOWED_IDS`.
+- `railway.json` е конфигуриран само за този процес (`npm run bot`, 1 реплика). Не го пускай на повече от една реплика.
+- Ботът пази опростен минутен scheduler за Telegram напомняния — това е единственото място, което проверява базата периодично. Ако не ползваш Telegram, не стартирай процеса. Ако ботът е само за разговор, задай `TELEGRAM_SCHEDULER=off` — тогава няма минутна проверка и Neon може да заспива.
+
+Команди: `/start`, `/short`, `/deep`, `/checkin`, `/end`, `/habits`, `/reminders`, `/link`, `/reset`.
+
+---
+
+## Етапно пускане (приятели и тестване)
+
+1. **Само ти:** деплой във Vercel, `npm run db:init`, включи известията на телефона и компютъра, провери тестовото известие и едно реално напомняне (след 2-3 минути).
+2. **2-3 близки приятели:** задай `INVITE_CODES` (по един код на човек), `DAILY_MESSAGE_LIMIT` (напр. 60-100) и spending limit при OpenAI/Anthropic. На iPhone ги насочи към „Добави към началния екран“.
+3. **След 1-2 седмици:** прегледай `lc_notification_deliveries` (грешки), разходите и обратната връзка. Чак тогава разшири кръга или обмисли APK през TWA.
+
+Известно ограничение: ако в базата вече има записани глобални промпти (от админ панела), те пазят старите текстове — натисни „Върни по подразбиране“ в Админ → Настройки, за да вземат новите (безопасност, кратка сесия, check-in).
+
+---
+
+## Структура
+
+```
+app/                  Next.js App Router (табло, чат, история, настройки, админ, API)
+components/           Споделени UI компоненти (навигация, тема, PWA, push)
+public/sw.js          Service worker (push + offline страница)
+src/core/             Коучинг ядро (coach, tools, safety, settings)
+src/notifications/    Време/дни, шаблони, dispatch, QStash, Web Push, DB слой
+src/llm/              OpenAI + Anthropic
+src/bot.ts, index.ts, scheduler.ts   Опционален Telegram процес
+scripts/init-db.ts    Идемпотентен SQL bootstrap
+tests/                Vitest
+```
+
+## Команди
+
+```bash
+npm run dev          # сайт
+npm run build        # production build
+npm run typecheck    # TypeScript
+npm test             # unit тестове
+npm run vapid        # нови VAPID ключове
+npm run db:init      # синхронизира lc_ таблиците
+npm run bot          # опционален Telegram бот
+```
+
+## Ограничения (честно)
+
+- Rate limiting в паметта е „по най-добро усилие“ на Vercel (всеки инстанс има своя памет). Твърдият лимит на разхода е `DAILY_MESSAGE_LIMIT` (брои се в базата).
+- Тихи часове **пропускат** известие, не го отлагат.
+- Известието зависи от браузъра/ОС: режим „Не безпокойте“, оптимизация на батерията или блокирани известия могат да го скрият.
+- Директен APK файл не се разпространява на този етап; PWA е достатъчна. TWA/APK може да се добави по-късно от същия сайт.

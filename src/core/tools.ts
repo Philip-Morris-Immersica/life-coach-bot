@@ -13,7 +13,17 @@ import {
   updateProfileFields,
   addInsight,
   setUserTimezone,
+  findHabit,
+  logCheckIn,
+  isCheckInStatus,
 } from "../memory";
+import { describeDays, normalizeDays, normalizeTime } from "../notifications/time";
+import { isReminderTarget } from "../notifications/content";
+import {
+  removeReminderSchedule,
+  syncReminder,
+  syncUserReminders,
+} from "../notifications/sync";
 
 export type CoachOption = { label: string; value: string };
 
@@ -95,10 +105,34 @@ export const COACH_TOOLS: ToolDef[] = [
         reason: { type: "string", description: "Кратка тема, напр. 'медитация'" },
         promptHint: {
           type: "string",
-          description: "Какво да съдържа съобщението в този час",
+          description: "Вътрешна насока какво е целта на напомнянето",
+        },
+        message: {
+          type: "string",
+          description:
+            "Готовият кратък текст на известието (до 240 знака), в който човекът ще види напомнянето. Ако липсва, се ползва стандартен текст.",
+        },
+        target: {
+          type: "string",
+          enum: ["chat", "checkin", "reminders"],
+          description: "Къде да отваря известието: чат, дневен check-in или настройки",
         },
       },
       required: ["time", "reason"],
+    },
+  },
+  {
+    name: "log_checkin",
+    description:
+      "Запиши отчитане на навик: done (направено), partial (частично) или missed (пропуснато), с кратка бележка за пречка/причина. Викай го, когато човекът каже как е минал навикът му.",
+    parameters: {
+      type: "object",
+      properties: {
+        habit: { type: "string", description: "Име или id на навика (по избор)" },
+        status: { type: "string", enum: ["done", "partial", "missed"] },
+        note: { type: "string", description: "Кратка бележка/пречка" },
+      },
+      required: ["status"],
     },
   },
   {
@@ -177,24 +211,6 @@ export const COACH_TOOLS: ToolDef[] = [
   },
 ];
 
-const DAY_MAP: Record<string, string> = {
-  mon: "понеделник",
-  tue: "вторник",
-  wed: "сряда",
-  thu: "четвъртък",
-  fri: "петък",
-  sat: "събота",
-  sun: "неделя",
-};
-
-function describeDays(days: string): string {
-  if (!days || days === "*") return "всеки ден";
-  return days
-    .split(",")
-    .map((d) => DAY_MAP[d.trim()] || d.trim())
-    .join(", ");
-}
-
 // Връща функция-изпълнител за подаване на runConversation.
 export function makeToolExecutor(userId: number, ui: CoachUiActions) {
   return async (call: ToolCall): Promise<string> => {
@@ -221,16 +237,23 @@ export function makeToolExecutor(userId: number, ui: CoachUiActions) {
         return r ? `Навикът "${r.name}" е деактивиран.` : "Не намерих такъв навик.";
       }
       case "upsert_reminder": {
-        const time = String(a.time || "").trim();
-        if (!/^\d{1,2}:\d{2}$/.test(time)) {
-          return "Невалиден час. Очаквам формат 'HH:MM'.";
+        const time = normalizeTime(a.time);
+        if (!time) {
+          return "Невалиден час. Очаквам формат 'HH:MM' (00:00-23:59).";
+        }
+        const days = normalizeDays(a.days);
+        if (!days) {
+          return "Невалидни дни. Ползвай '*' или списък като 'mon,wed,fri'.";
         }
         const r = await upsertReminder(userId, {
-          time: time.padStart(5, "0"),
-          days: a.days ? String(a.days) : "*",
-          reason: a.reason ? String(a.reason) : "",
+          time,
+          days,
+          reason: a.reason ? String(a.reason).slice(0, 200) : "",
           promptHint: a.promptHint ? String(a.promptHint) : "",
+          ...(a.message ? { message: String(a.message).slice(0, 240) } : {}),
+          ...(isReminderTarget(a.target) ? { target: a.target } : {}),
         });
+        await syncReminder(userId, r.id);
         return `Напомняне в ${r.time} (${describeDays(r.days)})${r.reason ? ` за "${r.reason}"` : ""} е настроено.`;
       }
       case "remove_reminder": {
@@ -244,7 +267,8 @@ export function makeToolExecutor(userId: number, ui: CoachUiActions) {
             (time || reason)
         );
         if (!match) return "Не намерих такова напомняне.";
-        await removeReminder(userId, match.id);
+        const removed = await removeReminder(userId, match.id);
+        if (removed) await removeReminderSchedule(removed.scheduleId);
         return `Напомнянето в ${match.time} е премахнато.`;
       }
       case "list_reminders": {
@@ -261,8 +285,34 @@ export function makeToolExecutor(userId: number, ui: CoachUiActions) {
         );
       }
       case "set_timezone": {
-        await setUserTimezone(userId, String(a.timezone || "Europe/Sofia"));
-        return `Часовата зона е зададена на ${a.timezone}.`;
+        const tz = String(a.timezone || "Europe/Sofia");
+        try {
+          await setUserTimezone(userId, tz);
+        } catch {
+          return `Невалидна часова зона "${tz}". Ползвай IANA име, напр. Europe/Sofia.`;
+        }
+        await syncUserReminders(userId);
+        return `Часовата зона е зададена на ${tz}.`;
+      }
+      case "log_checkin": {
+        const status = a.status;
+        if (!isCheckInStatus(status)) {
+          return "Невалиден статус. Ползвай done, partial или missed.";
+        }
+        let habitId: string | null = null;
+        let habitName = "";
+        if (a.habit) {
+          const h = await findHabit(userId, String(a.habit));
+          if (!h) return "Не намерих такъв активен навик.";
+          habitId = h.id;
+          habitName = h.name;
+        }
+        await logCheckIn(userId, {
+          habitId,
+          status,
+          note: a.note ? String(a.note) : undefined,
+        });
+        return `Записах отчитане${habitName ? ` за "${habitName}"` : ""}: ${status}.`;
       }
       case "log_insight": {
         const content = String(a.content || "").trim();
@@ -276,7 +326,7 @@ export function makeToolExecutor(userId: number, ui: CoachUiActions) {
           type,
           topic: a.topic ? String(a.topic) : undefined,
           reason: a.reason ? String(a.reason) : undefined,
-          url: `${webUrl()}/chat?deep=1`,
+          url: `${webUrl()}/chat?${type === "short" ? "short=1" : "deep=1"}`,
         };
         return "Предложението за сесия е готово за показване.";
       }

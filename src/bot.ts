@@ -1,13 +1,16 @@
 import "dotenv/config";
 import { Telegraf, Markup } from "telegraf";
 import {
-  endDeep,
+  endSession,
   finalizeOnboarding,
   handleUserMessage,
+  startCheckin,
   startDeep,
   startOrientation,
+  startShort,
   type CoachReply,
 } from "./core/coach";
+import { checkDailyLimit, LIMIT_MESSAGE, MAX_MESSAGE_CHARS } from "./core/limits";
 import {
   createLinkCode,
   getHabits,
@@ -21,6 +24,36 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 export const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
+// Allowlist: ако TELEGRAM_ALLOWED_IDS е зададен, само тези потребители могат
+// да ползват бота (защита на разхода за LLM).
+const allowedIds = (process.env.TELEGRAM_ALLOWED_IDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+bot.use(async (ctx, next) => {
+  if (allowedIds.length && !allowedIds.includes(String(ctx.from?.id ?? ""))) {
+    if (ctx.chat) {
+      await ctx.reply("Този бот е в затворено тестване.").catch(() => {});
+    }
+    return;
+  }
+  return next();
+});
+
+// Безопасно съобщение при грешка (без вътрешни детайли).
+bot.catch(async (err, ctx) => {
+  console.error("Telegram handler error:", err);
+  await ctx.reply("Нещо се обърка. Опитай пак след малко.").catch(() => {});
+});
+
+// Дневен лимит на съобщения (контрол на разхода). true = блокирано.
+async function overLimit(ctx: any, userId: number): Promise<boolean> {
+  const status = await checkDailyLimit(userId);
+  if (status.ok) return false;
+  await ctx.reply(LIMIT_MESSAGE);
+  return true;
+}
+
 // Строи inline клавиатура спрямо отговора (опции, предложение за сесия, етап).
 function keyboardFor(reply: CoachReply) {
   const rows: any[] = [];
@@ -33,7 +66,12 @@ function keyboardFor(reply: CoachReply) {
   if (reply.offer) {
     const label =
       reply.offer.type === "short" ? "Кратка сесия" : "Дълбока сесия";
-    rows.push([Markup.button.callback(`Започни: ${label}`, "start_deep")]);
+    rows.push([
+      Markup.button.callback(
+        `Започни: ${label}`,
+        reply.offer.type === "short" ? "start_short" : "start_deep"
+      ),
+    ]);
   }
   if (reply.stage === "onboarding") {
     rows.push([
@@ -42,6 +80,9 @@ function keyboardFor(reply: CoachReply) {
   }
   if (reply.stage === "deep") {
     rows.push([Markup.button.callback("Приключи дълбоката сесия", "end_deep")]);
+  }
+  if (reply.stage === "short") {
+    rows.push([Markup.button.callback("Приключи кратката сесия", "end_short")]);
   }
   return rows.length ? Markup.inlineKeyboard(rows) : undefined;
 }
@@ -61,7 +102,7 @@ bot.start(async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
   if (user.onboardingStage === "done") {
     await ctx.reply(
-      `Здравей пак, ${user.name || ""}! Тук съм. Разкажи как си, или ползвай /deep за дълбок разговор.`
+      `Здравей пак, ${user.name || ""}! Тук съм. Разкажи как си, или ползвай /short за кратка сесия или /deep за дълбок разговор.`
     );
     return;
   }
@@ -75,8 +116,10 @@ bot.help(async (ctx) => {
       "Аз съм твоят личен коуч и ментор за навици, вярвания и идентичност.",
       "",
       "Команди:",
+      "/short — кратка сесия (5-10 минути)",
       "/deep — започни дълбок коучинг разговор",
-      "/end — приключи дълбоката сесия",
+      "/checkin — кратък check-in за навиците",
+      "/end — приключи текущата сесия",
       "/habits — виж активните си навици",
       "/reminders — виж напомнянията си",
       "/link — свържи Telegram с уеб профила си",
@@ -87,13 +130,33 @@ bot.help(async (ctx) => {
 
 bot.command("deep", async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  if (await overLimit(ctx, user.id)) return;
   const reply = await startDeep(user.id);
+  await send(ctx, reply);
+});
+
+bot.command("short", async (ctx) => {
+  const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  if (await overLimit(ctx, user.id)) return;
+  const reply = await startShort(user.id);
+  await send(ctx, reply);
+});
+
+bot.command("checkin", async (ctx) => {
+  const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  if (user.onboardingStage !== "done") {
+    await ctx.reply("Първо да се опознаем малко — пиши ми свободно или започни с /start.");
+    return;
+  }
+  if (await overLimit(ctx, user.id)) return;
+  const reply = await startCheckin(user.id);
   await send(ctx, reply);
 });
 
 bot.command("end", async (ctx) => {
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  const reply = await endDeep(user.id);
+  const kind = user.mode === "short" ? "short" : "deep";
+  const reply = await endSession(user.id, kind);
   await send(ctx, reply);
 });
 
@@ -164,6 +227,7 @@ bot.command("reset", async (ctx) => {
 bot.action("finalize", async (ctx) => {
   await ctx.answerCbQuery("Обобщавам...");
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  if (await overLimit(ctx, user.id)) return;
   const reply = await finalizeOnboarding(user.id);
   await send(ctx, reply);
 });
@@ -171,14 +235,30 @@ bot.action("finalize", async (ctx) => {
 bot.action("start_deep", async (ctx) => {
   await ctx.answerCbQuery();
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  if (await overLimit(ctx, user.id)) return;
   const reply = await startDeep(user.id);
+  await send(ctx, reply);
+});
+
+bot.action("start_short", async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  if (await overLimit(ctx, user.id)) return;
+  const reply = await startShort(user.id);
   await send(ctx, reply);
 });
 
 bot.action("end_deep", async (ctx) => {
   await ctx.answerCbQuery();
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
-  const reply = await endDeep(user.id);
+  const reply = await endSession(user.id, "deep");
+  await send(ctx, reply);
+});
+
+bot.action("end_short", async (ctx) => {
+  await ctx.answerCbQuery();
+  const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  const reply = await endSession(user.id, "short");
   await send(ctx, reply);
 });
 
@@ -187,6 +267,7 @@ bot.action(/^opt:(.+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   const value = ctx.match[1];
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  if (await overLimit(ctx, user.id)) return;
   await ctx.sendChatAction("typing");
   const reply = await handleUserMessage(user.id, value, {
     onboardingStage: user.onboardingStage,
@@ -198,7 +279,12 @@ bot.action(/^opt:(.+)$/, async (ctx) => {
 bot.on("text", async (ctx) => {
   const text = ctx.message.text;
   if (text.startsWith("/")) return;
+  if (text.length > MAX_MESSAGE_CHARS) {
+    await ctx.reply(`Съобщението е твърде дълго (макс. ${MAX_MESSAGE_CHARS} знака).`);
+    return;
+  }
   const user = await getOrCreateUser(ctx.from.id, ctx.from.first_name);
+  if (await overLimit(ctx, user.id)) return;
   await ctx.sendChatAction("typing");
   const reply = await handleUserMessage(user.id, text, {
     onboardingStage: user.onboardingStage,

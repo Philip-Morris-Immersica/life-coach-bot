@@ -12,6 +12,9 @@ import {
   sessionsTable,
   usersTable,
 } from "@/src/db";
+import { getCheckInsSince, isCheckInStatus } from "@/src/memory";
+import { listUserSubscriptions } from "@/src/notifications/store";
+import { localParts } from "@/src/notifications/time";
 
 export type DashboardData = {
   profile: typeof profilesTable.$inferSelect | undefined;
@@ -26,6 +29,10 @@ export type DashboardData = {
     insightCount: number;
   };
   user: typeof usersTable.$inferSelect | undefined;
+  // Брой активни устройства за известия.
+  deviceCount: number;
+  // habitId -> статус от днес (в часовата зона на потребителя). "" = общ check-in.
+  todayStatus: Record<string, "done" | "partial" | "missed">;
 };
 
 export async function getDashboardData(userId: number): Promise<DashboardData> {
@@ -83,6 +90,19 @@ export async function getDashboardData(userId: number): Promise<DashboardData> {
       .then((r) => r[0] ?? { last7DaysMessages: 0 }),
   ]);
 
+  const devices = await listUserSubscriptions(userId, true);
+  const deviceCount = devices.length;
+
+  // Днешни check-in-и според локалната дата на потребителя (последният печели).
+  const tz = userRows[0]?.timezone || "Europe/Sofia";
+  const today = localParts(tz).date;
+  const recent = await getCheckInsSince(userId, new Date(Date.now() - 36 * 60 * 60 * 1000));
+  const todayStatus: DashboardData["todayStatus"] = {};
+  for (const c of [...recent].reverse()) {
+    if (localParts(tz, new Date(c.createdAt)).date !== today) continue;
+    if (isCheckInStatus(c.status)) todayStatus[c.habitId ?? ""] = c.status;
+  }
+
   return {
     profile: profileRows[0],
     habits: habitRows,
@@ -100,5 +120,7 @@ export async function getDashboardData(userId: number): Promise<DashboardData> {
       insightCount: insightRows.length,
     },
     user: userRows[0],
+    deviceCount,
+    todayStatus,
   };
 }

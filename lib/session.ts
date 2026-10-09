@@ -3,6 +3,7 @@
 import "server-only";
 import { redirect } from "next/navigation";
 import { readSession, type SessionData } from "./auth";
+import { getUserById } from "@/src/memory";
 
 export async function requireSession(): Promise<SessionData> {
   const session = await readSession();
@@ -10,8 +11,10 @@ export async function requireSession(): Promise<SessionData> {
   return session;
 }
 
+// Админ правата се проверяват в базата (не се вярва на JWT до изтичането му).
 export async function requireAdmin(): Promise<SessionData> {
   const session = await requireSession();
-  if (!session.isAdmin) redirect("/");
+  const user = await getUserById(session.userId);
+  if (!user?.isAdmin) redirect("/");
   return session;
 }

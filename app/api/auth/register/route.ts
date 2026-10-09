@@ -6,6 +6,8 @@ import {
   isValidEmail,
   setSessionCookie,
 } from "@/lib/auth";
+import { limited } from "@/lib/api";
+import { invitesRequired, isValidInvite } from "@/lib/invite";
 import { createWebUser, getUserByEmail } from "@/src/memory";
 import { db, usersTable } from "@/src/db";
 import { eq } from "drizzle-orm";
@@ -13,15 +15,26 @@ import { eq } from "drizzle-orm";
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
+  const rl = limited(req, "register", 6, 10 * 60_000);
+  if (rl) return rl;
   let body: any;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Невалиден JSON" }, { status: 400 });
   }
-  const name = String(body.name || "").trim();
+  const name = String(body.name || "").trim().slice(0, 80);
   const email = String(body.email || "").trim().toLowerCase();
   const password = String(body.password || "");
+  const inviteCode = String(body.inviteCode || "");
+
+  // Етапно пускане: нужен е код за покана (админ имейлите са освободени).
+  if (invitesRequired() && !isAdminEmail(email) && !isValidInvite(inviteCode)) {
+    return NextResponse.json(
+      { error: "Невалиден или липсващ код за покана." },
+      { status: 403 }
+    );
+  }
 
   if (!name) return NextResponse.json({ error: "Името е задължително" }, { status: 400 });
   if (!isValidEmail(email))

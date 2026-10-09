@@ -1,13 +1,78 @@
 @import "tailwindcss";
 
+/* =====================================================================
+   Calm-premium дизайн система: топли неутрални тонове, шалфей акцент,
+   светла и тъмна тема. Темата следва системата, освен ако потребителят
+   не е избрал ръчно (data-theme на <html>).
+   ===================================================================== */
+
 :root {
-  --background: #0b0e14;
-  --foreground: #e5e7eb;
-  --card: #11151c;
-  --border: #1f2937;
-  --accent: #4ade80;
-  --accent-fg: #052e16;
-  --muted: #94a3b8;
+  color-scheme: light;
+  --background: #f6f3ee;
+  --foreground: #1f2a27;
+  --card: #fffdf9;
+  --card-2: #f0ece4;
+  --border: #e2dccf;
+  --accent: #2f6f5e;
+  --accent-hover: #285e50;
+  --accent-fg: #ffffff;
+  --accent-soft: #e3efe9;
+  --muted: #5d6b66;
+  --danger: #b4452f;
+  --danger-soft: #f8e6e1;
+  --success: #2a7a4f;
+  --warning: #9a6a12;
+  --warning-soft: #f7edd5;
+  --bubble-user: #dcebe4;
+  --ring: rgba(47, 111, 94, 0.35);
+  --shadow: 0 1px 2px rgba(31, 42, 39, 0.05), 0 6px 20px rgba(31, 42, 39, 0.06);
+  --nav-h: 4rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --background: #0f1513;
+    --foreground: #e8efec;
+    --card: #161e1b;
+    --card-2: #1c2622;
+    --border: #26332e;
+    --accent: #6fcf9f;
+    --accent-hover: #85dbb0;
+    --accent-fg: #0b2418;
+    --accent-soft: #19302a;
+    --muted: #9db0a8;
+    --danger: #f08a75;
+    --danger-soft: #3a1f19;
+    --success: #7fd9a6;
+    --warning: #e3b45a;
+    --warning-soft: #33290f;
+    --bubble-user: #1f3a31;
+    --ring: rgba(111, 207, 159, 0.4);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 20px rgba(0, 0, 0, 0.25);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #0f1513;
+  --foreground: #e8efec;
+  --card: #161e1b;
+  --card-2: #1c2622;
+  --border: #26332e;
+  --accent: #6fcf9f;
+  --accent-hover: #85dbb0;
+  --accent-fg: #0b2418;
+  --accent-soft: #19302a;
+  --muted: #9db0a8;
+  --danger: #f08a75;
+  --danger-soft: #3a1f19;
+  --success: #7fd9a6;
+  --warning: #e3b45a;
+  --warning-soft: #33290f;
+  --bubble-user: #1f3a31;
+  --ring: rgba(111, 207, 159, 0.4);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 20px rgba(0, 0, 0, 0.25);
 }
 
 html,
@@ -16,51 +81,335 @@ body {
   color: var(--foreground);
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  line-height: 1.55;
+  min-height: 100dvh;
 }
 
 * {
   border-color: var(--border);
 }
 
+h1,
+.font-display {
+  font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  letter-spacing: -0.01em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 0.4rem;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 @layer utilities {
+  /* ---------- Повърхности ---------- */
   .card {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 0.75rem;
-    padding: 1rem;
+    border-radius: 1rem;
+    padding: 1.1rem;
+    box-shadow: var(--shadow);
   }
+  .card-soft {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+    border-radius: 0.9rem;
+    padding: 0.9rem;
+  }
+  .card-accent {
+    background: var(--accent-soft);
+    border: 1px solid var(--accent);
+    border-radius: 1rem;
+    padding: 1.1rem;
+  }
+  .muted {
+    color: var(--muted);
+  }
+
+  /* ---------- Бутони ---------- */
   .btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 0.5rem;
+    min-height: 2.75rem;
     background: var(--accent);
     color: var(--accent-fg);
-    padding: 0.5rem 1rem;
-    border-radius: 0.5rem;
+    padding: 0.5rem 1.1rem;
+    border-radius: 0.75rem;
+    border: 1px solid transparent;
     font-weight: 600;
-    transition: opacity 0.15s ease;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.05s ease, opacity 0.15s ease;
   }
   .btn:hover {
-    opacity: 0.9;
+    background: var(--accent-hover);
+  }
+  .btn:active {
+    transform: translateY(1px);
+  }
+  .btn:disabled,
+  .btn[aria-disabled="true"] {
+    opacity: 0.55;
+    cursor: not-allowed;
   }
   .btn-ghost {
     background: transparent;
     color: var(--foreground);
     border: 1px solid var(--border);
   }
-  .input {
+  .btn-ghost:hover {
+    background: var(--card-2);
+  }
+  .btn-danger {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+  }
+  .btn-danger:hover {
+    background: var(--danger-soft);
+  }
+  .btn-sm {
+    min-height: 2.25rem;
+    padding: 0.25rem 0.8rem;
+    font-size: 0.875rem;
+    border-radius: 0.6rem;
+  }
+
+  /* ---------- Полета ---------- */
+  .input,
+  .select,
+  .textarea {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 0.5rem;
-    padding: 0.5rem 0.75rem;
+    border-radius: 0.75rem;
+    padding: 0.6rem 0.8rem;
+    min-height: 2.75rem;
     color: var(--foreground);
     width: 100%;
+    font-size: 1rem; /* 16px — без автоматично увеличение на iOS */
   }
-  .input:focus {
+  .textarea {
+    min-height: 5rem;
+    resize: vertical;
+  }
+  .input:focus,
+  .select:focus,
+  .textarea:focus {
     outline: none;
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--ring);
   }
-  .muted {
+  .input::placeholder,
+  .textarea::placeholder {
     color: var(--muted);
+    opacity: 0.8;
+  }
+  .field-label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: var(--muted);
+    margin-bottom: 0.3rem;
+  }
+
+  /* ---------- Съобщения/статуси ---------- */
+  .text-error {
+    color: var(--danger);
+  }
+  .text-success {
+    color: var(--success);
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.1rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: var(--card-2);
+    color: var(--muted);
+    border: 1px solid var(--border);
+  }
+  .badge-ok {
+    background: var(--accent-soft);
+    color: var(--success);
+    border-color: transparent;
+  }
+  .badge-warn {
+    background: var(--warning-soft);
+    color: var(--warning);
+    border-color: transparent;
+  }
+  .badge-err {
+    background: var(--danger-soft);
+    color: var(--danger);
+    border-color: transparent;
+  }
+  .notice {
+    border-radius: 0.8rem;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.9rem;
+    background: var(--warning-soft);
+    color: var(--warning);
+  }
+  .notice-err {
+    background: var(--danger-soft);
+    color: var(--danger);
+  }
+
+  /* ---------- Чипове за ден ---------- */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.5rem;
+    min-height: 2.5rem;
+    padding: 0 0.6rem;
+    border-radius: 0.7rem;
+    border: 1px solid var(--border);
+    background: var(--card);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+  }
+  .chip[aria-pressed="true"] {
+    background: var(--accent);
+    color: var(--accent-fg);
+    border-color: var(--accent);
+  }
+
+  /* ---------- Превключвател ---------- */
+  .switch {
+    position: relative;
+    width: 3rem;
+    height: 1.75rem;
+    border-radius: 999px;
+    background: var(--border);
+    border: 0;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.15s ease;
+  }
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 0.2rem;
+    left: 0.2rem;
+    width: 1.35rem;
+    height: 1.35rem;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+    transition: transform 0.15s ease;
+  }
+  .switch[aria-checked="true"] {
+    background: var(--accent);
+  }
+  .switch[aria-checked="true"]::after {
+    transform: translateX(1.25rem);
+  }
+
+  /* ---------- Чат ---------- */
+  .bubble-user {
+    background: var(--bubble-user);
+  }
+  .bubble-ai {
+    background: var(--card-2);
+    border: 1px solid var(--border);
+  }
+
+  /* ---------- Навигация ---------- */
+  .nav-link {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.45rem 0.8rem;
+    border-radius: 0.7rem;
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 0.95rem;
+  }
+  .nav-link:hover {
+    color: var(--foreground);
+    background: var(--card-2);
+  }
+  .nav-link[aria-current="page"] {
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .bottom-nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    display: flex;
+    justify-content: space-around;
+    background: color-mix(in srgb, var(--card) 94%, transparent);
+    backdrop-filter: blur(12px);
+    border-top: 1px solid var(--border);
+    padding: 0.35rem 0.25rem calc(0.35rem + env(safe-area-inset-bottom));
+  }
+  .bottom-nav a,
+  .bottom-nav button {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+    min-height: 3rem;
+    justify-content: center;
+    padding: 0.25rem;
+    border-radius: 0.8rem;
+    color: var(--muted);
+    font-size: 0.7rem;
+    font-weight: 600;
+    background: transparent;
+    border: 0;
+  }
+  .bottom-nav a[aria-current="page"] {
+    color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  /* ---------- Оформление ---------- */
+  .page-title {
+    font-size: 1.6rem;
+    line-height: 1.2;
+    font-weight: 600;
+  }
+  .section-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  .app-main {
+    padding-bottom: calc(var(--nav-h) + env(safe-area-inset-bottom) + 1rem);
+  }
+  @media (min-width: 768px) {
+    .app-main {
+      padding-bottom: 2rem;
+    }
+    /* Долната лента е само за телефон (display:flex по-горе бие md:hidden). */
+    .bottom-nav {
+      display: none;
+    }
   }
 }

@@ -21,17 +21,29 @@ export const usersTable = pgTable("lc_users", {
   passwordHash: text("password_hash"),
   isAdmin: boolean("is_admin").notNull().default(false),
   name: varchar({ length: 255 }),
-  // 'new' (още нищо) | 'interview' (тече опознавателна сесия) | 'done'
+  // 'new' (още нищо) | 'oriented' (след ориентация, тече опознаване) | 'done'
   onboardingStage: varchar("onboarding_stage", { length: 20 })
     .notNull()
     .default("new"),
   // Включени ли са проактивните check-in-и
   morningCheckin: boolean("morning_checkin").notNull().default(true),
   eveningCheckin: boolean("evening_checkin").notNull().default(true),
-  // 'idle' (нормален режим) | 'deep' (тече дълбока сесия)
+  // 'idle' (нормален режим) | 'short' (кратка сесия) | 'deep' (дълбока сесия)
   mode: varchar({ length: 20 }).notNull().default("idle"),
   // Часова зона на потребителя — за персоналните напомняния.
   timezone: varchar({ length: 64 }).notNull().default("Europe/Sofia"),
+  // Настройки на известията (Web Push).
+  // Глобална пауза на всички известия.
+  notificationsPaused: boolean("notifications_paused").notNull().default(false),
+  // Тихи часове "HH:MM" (локално време). Празно = изключени.
+  quietHoursStart: varchar("quiet_hours_start", { length: 5 })
+    .notNull()
+    .default(""),
+  quietHoursEnd: varchar("quiet_hours_end", { length: 5 })
+    .notNull()
+    .default(""),
+  // Общ текст на известията, без чувствително съдържание на заключен екран.
+  privacyMode: boolean("privacy_mode").notNull().default(false),
   lastActiveAt: timestamp("last_active_at").notNull().defaultNow(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
@@ -97,7 +109,7 @@ export const sessionsTable = pgTable("lc_sessions", {
   userId: integer("user_id")
     .notNull()
     .references(() => usersTable.id, { onDelete: "cascade" }),
-  // 'onboarding' | 'deep'
+  // 'onboarding' | 'short' | 'deep'
   type: varchar({ length: 20 }).notNull().default("deep"),
   title: varchar({ length: 300 }).notNull().default(""),
   // Тема/фокус на сесията: 'habits' | 'goals' | 'beliefs' | 'identity' | ...
@@ -146,9 +158,51 @@ export const remindersTable = pgTable("lc_reminders", {
   reason: varchar({ length: 200 }).notNull().default(""),
   // Насока към коуча какво да съдържа съобщението.
   promptHint: text("prompt_hint").notNull().default(""),
+  // Готов текст на известието (шаблон). Празно = генерира се стандартен текст.
+  message: text().notNull().default(""),
+  // Къде отваря известието: 'chat' | 'checkin' | 'reminders'
+  target: varchar({ length: 20 }).notNull().default("chat"),
   active: boolean().notNull().default(true),
   // Дата "YYYY-MM-DD", на която последно е изпратено (за дедупликация).
   lastSentOn: varchar("last_sent_on", { length: 10 }).notNull().default(""),
+  // Външен график (QStash). 'idle' = няма нужда/няма устройство,
+  // 'synced' = график е активен, 'error' = последният опит се провали.
+  scheduleId: varchar("schedule_id", { length: 100 }).notNull().default(""),
+  syncStatus: varchar("sync_status", { length: 20 }).notNull().default("idle"),
+  syncError: text("sync_error").notNull().default(""),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+// Регистрирани устройства/браузъри за Web Push. Едно устройство = един endpoint.
+export const pushSubscriptionsTable = pgTable("lc_push_subscriptions", {
+  id: uuid().primaryKey().defaultRandom(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => usersTable.id, { onDelete: "cascade" }),
+  endpoint: text().notNull().unique(),
+  p256dh: text().notNull(),
+  auth: text().notNull(),
+  // Кратко описание на устройството (от user agent), показва се в настройките.
+  label: varchar({ length: 120 }).notNull().default(""),
+  active: boolean().notNull().default(true),
+  failureCount: integer("failure_count").notNull().default(0),
+  lastSuccessAt: timestamp("last_success_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+
+// Журнал на изпратените известия + ключ за идемпотентност: един и същ
+// (напомняне, дата) не може да се изпрати два пъти при retry от QStash.
+export const notificationDeliveriesTable = pgTable("lc_notification_deliveries", {
+  id: uuid().primaryKey().defaultRandom(),
+  userId: integer("user_id")
+    .notNull()
+    .references(() => usersTable.id, { onDelete: "cascade" }),
+  reminderId: uuid("reminder_id"),
+  dedupeKey: varchar("dedupe_key", { length: 120 }).notNull().unique(),
+  // 'claimed' | 'sent' | 'skipped' | 'failed'
+  status: varchar({ length: 20 }).notNull().default("claimed"),
+  detail: text().notNull().default(""),
+  sentCount: integer("sent_count").notNull().default(0),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -189,3 +243,5 @@ export type Profile = typeof profilesTable.$inferSelect;
 export type Habit = typeof habitsTable.$inferSelect;
 export type Session = typeof sessionsTable.$inferSelect;
 export type Reminder = typeof remindersTable.$inferSelect;
+export type PushSubscriptionRow = typeof pushSubscriptionsTable.$inferSelect;
+export type CheckIn = typeof checkInsTable.$inferSelect;

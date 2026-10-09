@@ -1,66 +1,74 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireSession } from "@/lib/session";
+import { apiAuth, isFailure, jsonError, limited, readJson } from "@/lib/api";
 import {
-  endDeep,
+  endSession,
   finalizeOnboarding,
   handleUserMessage,
+  startCheckin,
   startDeep,
   startOrientation,
+  startShort,
 } from "@/src/core/coach";
-import { getUserById } from "@/src/memory";
+import { checkDailyLimit, LIMIT_MESSAGE, MAX_MESSAGE_CHARS } from "@/src/core/limits";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
-  const session = await requireSession();
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Невалиден JSON" }, { status: 400 });
-  }
+  const auth = await apiAuth(req);
+  if (isFailure(auth)) return auth;
+  const { user } = auth;
 
+  // Защита на разхода: по потребител, на минута.
+  const rl = limited(req, "chat", 20, 60_000, user.id);
+  if (rl) return rl;
+
+  const body = await readJson(req);
+  if (!body) return jsonError("Невалидна заявка.", 400);
   const action = String(body.action || "message");
-  const user = await getUserById(session.userId);
-  if (!user) {
-    return NextResponse.json({ error: "Профилът не е намерен" }, { status: 404 });
-  }
+
+  const limit = await checkDailyLimit(user.id);
+  if (!limit.ok) return jsonError(LIMIT_MESSAGE, 429);
 
   try {
-    if (action === "message") {
-      const text = String(body.text || "").trim();
-      if (!text) {
-        return NextResponse.json({ error: "Празно съобщение" }, { status: 400 });
+    switch (action) {
+      case "message": {
+        const text = String(body.text || "").trim();
+        if (!text) return jsonError("Празно съобщение.", 400);
+        if (text.length > MAX_MESSAGE_CHARS) {
+          return jsonError(`Съобщението е твърде дълго (макс. ${MAX_MESSAGE_CHARS} знака).`, 400);
+        }
+        return NextResponse.json(
+          await handleUserMessage(user.id, text, {
+            onboardingStage: user.onboardingStage,
+            mode: user.mode,
+          })
+        );
       }
-      const reply = await handleUserMessage(session.userId, text, {
-        onboardingStage: user.onboardingStage,
-        mode: user.mode,
-      });
-      return NextResponse.json(reply);
+      case "start_orientation":
+        return NextResponse.json(await startOrientation(user.id));
+      case "finalize_onboarding":
+        return NextResponse.json(await finalizeOnboarding(user.id));
+      case "start_deep":
+        return NextResponse.json(
+          await startDeep(user.id, String(body.topic || "").trim().slice(0, 200))
+        );
+      case "start_short":
+        return NextResponse.json(
+          await startShort(user.id, String(body.topic || "").trim().slice(0, 200))
+        );
+      case "start_checkin":
+        return NextResponse.json(await startCheckin(user.id));
+      case "end_deep":
+        return NextResponse.json(await endSession(user.id, "deep"));
+      case "end_short":
+        return NextResponse.json(await endSession(user.id, "short"));
+      default:
+        return jsonError("Непознато действие.", 400);
     }
-    if (action === "start_orientation") {
-      const reply = await startOrientation(session.userId);
-      return NextResponse.json(reply);
-    }
-    if (action === "finalize_onboarding") {
-      const reply = await finalizeOnboarding(session.userId);
-      return NextResponse.json(reply);
-    }
-    if (action === "start_deep") {
-      const topic = String(body.topic || "").trim();
-      const reply = await startDeep(session.userId, topic);
-      return NextResponse.json(reply);
-    }
-    if (action === "end_deep") {
-      const reply = await endDeep(session.userId);
-      return NextResponse.json(reply);
-    }
-    return NextResponse.json({ error: "Непознато действие" }, { status: 400 });
-  } catch (err: any) {
+  } catch (err) {
+    // Подробностите остават в логовете; към клиента не изтича вътрешна информация.
     console.error("Chat API error:", err);
-    return NextResponse.json(
-      { error: err?.message || "Сървърна грешка" },
-      { status: 500 }
-    );
+    return jsonError("Нещо се обърка при коуча. Опитай отново след малко.", 500);
   }
 }

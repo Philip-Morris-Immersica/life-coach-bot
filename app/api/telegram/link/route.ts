@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireSession } from "@/lib/session";
+import { apiAuth, isFailure, jsonError, limited, readJson } from "@/lib/api";
 import { consumeLinkCode, linkTelegramToWebUser } from "@/src/memory";
 import { db, usersTable } from "@/src/db";
 import { eq } from "drizzle-orm";
@@ -7,25 +7,18 @@ import { eq } from "drizzle-orm";
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
-  const session = await requireSession();
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Невалиден JSON" }, { status: 400 });
-  }
-  const code = String(body.code || "").trim();
-  if (!code) {
-    return NextResponse.json({ error: "Кодът е задължителен" }, { status: 400 });
-  }
+  const auth = await apiAuth(req);
+  if (isFailure(auth)) return auth;
+  // Кодът е кратък — ограничаваме опитите за налучкване.
+  const rl = limited(req, "link-telegram", 6, 10 * 60_000, auth.user.id);
+  if (rl) return rl;
+
+  const body = await readJson(req);
+  const code = String(body?.code || "").trim();
+  if (!code) return jsonError("Кодът е задължителен.", 400);
 
   const codeUserId = await consumeLinkCode(code, "link");
-  if (!codeUserId) {
-    return NextResponse.json(
-      { error: "Невалиден, използван или изтекъл код" },
-      { status: 400 }
-    );
-  }
+  if (!codeUserId) return jsonError("Невалиден, използван или изтекъл код.", 400);
 
   // Намери telegramId от потребителя, който е създал кода (това е Telegram-only
   // потребителят, който е писал /link в бота).
@@ -35,13 +28,8 @@ export async function POST(req: NextRequest) {
     .where(eq(usersTable.id, codeUserId))
     .limit(1);
   const tgUser = rows[0];
-  if (!tgUser?.telegramId) {
-    return NextResponse.json(
-      { error: "Кодът не е свързан с Telegram акаунт" },
-      { status: 400 }
-    );
-  }
+  if (!tgUser?.telegramId) return jsonError("Кодът не е свързан с Telegram акаунт.", 400);
 
-  await linkTelegramToWebUser(session.userId, tgUser.telegramId);
+  await linkTelegramToWebUser(auth.user.id, tgUser.telegramId);
   return NextResponse.json({ ok: true });
 }

@@ -1,98 +1,67 @@
+// ОПЦИОНАЛЕН Telegram scheduler. Ползва се само от отделния процес `npm run bot`
+// (никога във Vercel). Уеб напомнянията минават през QStash + Web Push.
+// Тук текстът е шаблон (без LLM) и има защита срещу застъпване на tick-овете.
+
 import cron from "node-cron";
 import type { Telegraf } from "telegraf";
-import {
-  allActiveReminders,
-  markReminderSent,
-  saveMessage,
-} from "./memory";
-import { generateReminderMessage } from "./core/coach";
+import { allActiveReminders, markReminderSent, saveMessage } from "./memory";
+import { buildReminderPayload } from "./notifications/content";
+import { dayMatches, inQuietHours, localParts } from "./notifications/time";
+import { db, usersTable } from "./db/index";
+import { eq } from "drizzle-orm";
 
-// Връща локалните час:минута, ден от седмицата и датата (YYYY-MM-DD) за зона.
-function localParts(timezone: string): {
-  hhmm: string;
-  day: string;
-  date: string;
-} {
-  const tz = timezone || "Europe/Sofia";
-  let timeStr: string;
-  let dateStr: string;
-  let weekday: string;
-  try {
-    timeStr = new Intl.DateTimeFormat("en-GB", {
-      timeZone: tz,
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    }).format(new Date());
-    dateStr = new Intl.DateTimeFormat("en-CA", {
-      timeZone: tz,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(new Date());
-    weekday = new Intl.DateTimeFormat("en-US", {
-      timeZone: tz,
-      weekday: "short",
-    })
-      .format(new Date())
-      .toLowerCase();
-  } catch {
-    // Невалидна зона — fallback към сървърното време.
-    const d = new Date();
-    timeStr = d.toTimeString().slice(0, 5);
-    dateStr = d.toISOString().slice(0, 10);
-    weekday = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][d.getDay()];
-  }
-  return { hhmm: timeStr, day: weekday, date: dateStr };
-}
+let running = false;
 
-function dayMatches(days: string, today: string): boolean {
-  if (!days || days === "*") return true;
-  return days
-    .split(",")
-    .map((d) => d.trim().toLowerCase())
-    .includes(today);
-}
-
-// Изпълнява се всяка минута: намира дължимите напомняния и ги изпраща.
 async function tick(bot: Telegraf) {
-  let reminders;
+  if (running) return; // предишният tick още не е приключил
+  running = true;
   try {
-    reminders = await allActiveReminders();
-  } catch (err) {
-    console.error("Грешка при четене на напомняния:", err);
-    return;
-  }
-  for (const r of reminders) {
-    if (!r.telegramId) continue; // напомнянията се пращат в Telegram
-    const { hhmm, day, date } = localParts(r.timezone);
-    if (r.time !== hhmm) continue;
-    if (!dayMatches(r.days, day)) continue;
-    if (r.lastSentOn === date) continue; // вече изпратено днес
-
+    let reminders;
     try {
-      const msg = await generateReminderMessage(r.userId, {
-        reason: r.reason,
-        promptHint: r.promptHint,
-      });
-      if (msg.text) {
-        await bot.telegram.sendMessage(r.telegramId, msg.text);
-        await saveMessage(r.userId, "assistant", msg.text, "checkin", {
-          model: msg.model,
-          promptTokens: msg.promptTokens,
-          completionTokens: msg.completionTokens,
-          costUsd: msg.costUsd,
-        });
-      }
-      await markReminderSent(r.id, date);
+      reminders = await allActiveReminders();
     } catch (err) {
-      console.error(`Грешка при напомняне ${r.id} (user ${r.userId}):`, err);
+      console.error("Грешка при четене на напомняния:", err);
+      return;
     }
+    for (const r of reminders) {
+      if (!r.telegramId) continue; // напомнянията се пращат в Telegram
+      const { hhmm, day, date } = localParts(r.timezone);
+      if (r.time !== hhmm) continue;
+      if (!dayMatches(r.days, day)) continue;
+      if (r.lastSentOn === date) continue; // вече изпратено днес
+
+      try {
+        const u = await db
+          .select({
+            paused: usersTable.notificationsPaused,
+            qs: usersTable.quietHoursStart,
+            qe: usersTable.quietHoursEnd,
+          })
+          .from(usersTable)
+          .where(eq(usersTable.id, r.userId))
+          .limit(1);
+        const prefs = u[0];
+        if (prefs?.paused || (prefs && inQuietHours(prefs.qs, prefs.qe, hhmm))) {
+          await markReminderSent(r.id, date);
+          continue;
+        }
+        // Маркираме първо — така при грешка няма да спамим всяка минута.
+        await markReminderSent(r.id, date);
+        const payload = buildReminderPayload(r, { privacyMode: false });
+        await bot.telegram.sendMessage(r.telegramId, payload.body);
+        await saveMessage(r.userId, "assistant", payload.body, "checkin");
+      } catch (err) {
+        console.error(`Грешка при напомняне ${r.id} (user ${r.userId}):`, err);
+      }
+    }
+  } finally {
+    running = false;
   }
 }
 
 export async function startScheduler(bot: Telegraf) {
-  // Всяка минута проверяваме персоналните напомняния (timezone-aware).
   cron.schedule("* * * * *", () => tick(bot));
-  console.log("Scheduler стартиран: персонални напомняния се проверяват всяка минута.");
+  console.log(
+    "Telegram scheduler стартиран (опционален процес): проверка на напомняния всяка минута."
+  );
 }
